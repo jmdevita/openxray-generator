@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+models/
+.plextoken
+.tmdbkey
+.auddtoken
+.jellyfintoken
+.jellyfinuser
+generator/.env
+.huburl
+# internal working docs, never committed
+docs/

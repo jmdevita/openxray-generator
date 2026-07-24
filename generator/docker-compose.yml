@@ -1,0 +1,61 @@
+# OpenXray Generator: the stack that MAKES timelines from your own media
+# (the Hub, in ../hub, distributes them). Orchestrator/frontend + stateless
+# engine services. State lives in the timelines volume: the same store the
+# CLI and Plezy use. The hub (hub/) deploys separately (or add it here).
+#
+#   cd generator && docker compose up -d
+#   open http://localhost:8080
+#
+# Secrets: put keys in generator/.env (gitignored):
+#   PLEX_ORIGIN=https://plex.example.com
+#   PLEX_TOKEN=...   TMDB_KEY=...   AUDD_API_TOKEN=...
+#   XRAY_WEB_TOKEN=...   # optional: pin the dashboard token instead of the
+#                        # generated one (env overrides always; rotation = edit + restart)
+
+# Pinned so the project and its state don't depend on this directory's name,
+# renaming the folder would otherwise orphan the volume holding your sign-in
+# and every timeline you've generated.
+name: openxray-generator
+
+services:
+  orchestrator:
+    # container_name pins what `docker ps` shows; inter-service DNS still uses
+    # the service names below (engine-audio, engine-faces), so the URLs hold.
+    container_name: openxray-generator
+    build: { context: .., dockerfile: generator/orchestrator.Dockerfile }
+    ports: ["8080:8080"]
+    environment:
+      PLEX_ORIGIN: ${PLEX_ORIGIN}
+      PLEX_TOKEN: ${PLEX_TOKEN}
+      TMDB_KEY: ${TMDB_KEY}
+      AUDD_API_TOKEN: ${AUDD_API_TOKEN:-}
+      XRAY_STORE: /timelines
+      XRAY_ENGINE_AUDIO_URL: http://engine-audio:8082
+      # uncomment to run face work in the engine-faces container instead of
+      # in-process (the GPU/scale-out swap point):
+      # XRAY_ENGINE_FACES_URL: http://engine-faces:8081
+      # optional nightly batch:
+      # SCHEDULE_LIBRARY: "TV Shows"
+      # SCHEDULE_MAX_TITLES: "3"
+      # SCHEDULE_HOUR_UTC: "3"
+    volumes:
+      - timelines:/timelines
+    depends_on: [engine-audio]
+
+  engine-faces:
+    container_name: openxray-engine-faces
+    build: { context: .., dockerfile: generator/engine-faces.Dockerfile }
+    # opt-in from the orchestrator via XRAY_ENGINE_FACES_URL (local in-process
+    # faces is the default; this container is the GPU/scale-out swap point)
+    volumes:
+      - timelines:/timelines
+
+  engine-audio:
+    container_name: openxray-engine-audio
+    build: { context: .., dockerfile: generator/engine-audio.Dockerfile }
+    volumes:
+      - timelines:/timelines
+
+volumes:
+  timelines:
+    name: openxray-timelines

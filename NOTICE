@@ -1,0 +1,22 @@
+OpenXray Generator
+Copyright 2026 Julian De Vita
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+---
+
+This product uses the TMDB API but is not endorsed or certified by TMDB.
+Titles, people, and characters are identified using The Movie Database
+(https://www.themoviedb.org). TMDB is not affiliated with this project.
+Operators supply their own TMDB API key and are bound by TMDB's API Terms
+of Use, which permit non-commercial use only.
+
+Song identification, when enabled, uses AudD (https://audd.io) under the
+operator's own key. No audio is retained.
+
+Trivia derives from Wikidata (CC0) and paraphrased Wikipedia (CC BY-SA 4.0);
+each fact records its origin in the timeline's `source` field.
+
+X-Ray is a trademark of Amazon Technologies, Inc. This project is not
+affiliated with, endorsed by, or connected to Amazon, and uses the term only
+descriptively to say what kind of feature this produces.

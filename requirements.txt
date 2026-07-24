@@ -1,0 +1,8 @@
+# xray: unified X-Ray timeline system (see README.md / SCHEMA.md)
+numpy
+opencv-python>=4.9   # YuNet detect + SFace embed ship inside cv2
+scikit-learn>=1.3    # HDBSCAN face clustering
+requests             # Plex / TMDb / Wikipedia / AudD / Jellyfin
+jsonschema>=4.0      # timeline contract validation (store.write_timeline)
+fastapi>=0.110    # orchestrator + engine services
+uvicorn>=0.27

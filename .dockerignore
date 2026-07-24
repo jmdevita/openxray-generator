@@ -1,0 +1,28 @@
+# Keep the build context lean: images COPY only xray/, schema/,
+# requirements.txt, scripts/fetch_models.py, SCHEMA.md. Everything below is
+# either huge, secret, or regenerated inside the image (models/ is re-fetched
+# by scripts/fetch_models.py during the build).
+.venv/
+.git/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+models/
+# runtime/work dirs the passes create
+exports/
+frames/
+index_work/
+music_work/
+**/timelines/
+# local secrets (never bake into an image)
+.plextoken
+.tmdbkey
+.auddtoken
+.jellyfintoken
+.jellyfinuser
+.huburl
+generator/.env
+# editor / OS cruft
+.DS_Store
+.idea/
+.vscode/

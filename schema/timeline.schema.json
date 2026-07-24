@@ -1,0 +1,286 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hub.openxray.net/schema/timeline.schema.json",
+  "title": "X-Ray timeline",
+  "description": "Per-title timeline produced by the indexer and enrichment passes; consumed by Plezy and the browser extension. Contract rules: additive evolution only (version stays 1), consumers ignore unknown fields, all times are ms from title start with half-open [startMs, endMs) intervals.",
+  "type": "object",
+  "required": [
+    "contentId",
+    "version",
+    "generated",
+    "cast",
+    "actorIntervals",
+    "musicIntervals",
+    "trivia"
+  ],
+  "properties": {
+    "contentId": {
+      "type": "string",
+      "pattern": "^tmdb-(movie-[0-9]+|tv-[0-9]+-s[0-9]{2}e[0-9]{2})$",
+      "description": "Canonical content identity; also the filename stem in the store."
+    },
+    "version": {
+      "const": 1
+    },
+    "generated": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "provenance": {
+      "type": "object",
+      "description": "Per-block generation stamps: which pass wrote the block, when.",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "generated",
+          "version"
+        ],
+        "properties": {
+          "generated": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "cast": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "actorId",
+          "name"
+        ],
+        "properties": {
+          "actorId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string"
+          },
+          "character": {
+            "type": "string"
+          },
+          "thumb": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "person": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "required": [
+              "bio",
+              "knownFor"
+            ],
+            "properties": {
+              "bio": {
+                "type": "string"
+              },
+              "birthday": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "deathday": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "placeOfBirth": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "knownFor": {
+                "type": "array",
+                "maxItems": 14,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "title",
+                    "year",
+                    "character"
+                  ],
+                  "properties": {
+                    "title": {
+                      "type": "string"
+                    },
+                    "year": {
+                      "type": "string"
+                    },
+                    "character": {
+                      "type": "string"
+                    },
+                    "mediaType": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "posterUrl": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "actorIntervals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "actorId",
+          "startMs",
+          "endMs",
+          "confidence"
+        ],
+        "properties": {
+          "actorId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "startMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "endMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      }
+    },
+    "musicIntervals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "title",
+          "startMs",
+          "endMs"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "artist": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "startMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "endMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "confidence": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 1
+          },
+          "source": {
+            "enum": [
+              "audd",
+              "library",
+              null
+            ]
+          }
+        }
+      }
+    },
+    "trivia": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "startMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "null = title-level fact, position-independent. Set (a future scene-pinning pass) = surface while playback is inside [startMs, endMs). Untimed and timed facts coexist."
+          },
+          "endMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "null = title-level fact, position-independent. Set (a future scene-pinning pass) = surface while playback is inside [startMs, endMs). Untimed and timed facts coexist."
+          }
+        }
+      }
+    },
+    "sourceRuntimeMs": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Runtime of the media the intervals were computed from — receivers compare against their copy to catch cut mismatches."
+    },
+    "generator": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "description": "What produced this file (traceability for shared timelines)."
+    }
+  }
+}
