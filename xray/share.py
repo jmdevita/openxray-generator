@@ -113,9 +113,51 @@ def upload_to_hub(store_dir: Path, key: str, hub_url: str,
     return r.json()
 
 
+def hub_catalog(hub_url: str, timeout: int = 15) -> dict[str, dict] | None:
+    """The hub's whole catalog as {contentId: entry}, for planning a run.
+
+    One request answers "which of my 400 titles has somebody already done?",
+    which is the difference between an estimate and a guess. Entries carry a
+    `units` list, so a caller can tell a full index on the hub from a seed
+    and count only the ones that would actually save it work.
+
+    Tri-state on purpose: None means the hub could not be asked (down,
+    misconfigured, garbage response), while {} means it answered and holds
+    nothing. Collapsing those into one value would let a planner report "no
+    community coverage" when the truth is "no idea"."""
+    try:
+        r = requests.get(f"{hub_url.rstrip('/')}/index.json", timeout=timeout)
+        r.raise_for_status()
+        entries = r.json().get("catalog") or []
+    except (requests.RequestException, ValueError) as e:
+        print(f"[hub] catalog unavailable ({e}); planning without it")
+        return None
+    return {e["contentId"]: e for e in entries if e.get("contentId")}
+
+
+def timelines_base(hub_url: str, timeout: int = 15) -> str:
+    """Where this hub says its timelines live.
+
+    Manifest-first, the same contract Plezy follows: the hub publishes a
+    `timelines` base in index.json and points it at whatever is actually
+    serving bytes (a CDN in front of a bucket, in production). Asking the
+    hub host directly would work, but it would drag every download through
+    the origin and quietly undo the read/write split.
+
+    Falls back to the hub's own /t on any failure, which is what a hub with
+    no bucket configured serves anyway."""
+    fallback = f"{hub_url.rstrip('/')}/t"
+    try:
+        r = requests.get(f"{hub_url.rstrip('/')}/index.json", timeout=timeout)
+        r.raise_for_status()
+        return (r.json().get("timelines") or fallback).rstrip("/")
+    except (requests.RequestException, ValueError):
+        return fallback
+
+
 def fetch_from_hub(store_dir: Path, hub_url: str, content_id: str) -> Path | None:
     """Try the community hub for a timeline. None = not in the catalog."""
-    url = f"{hub_url.rstrip('/')}/t/{content_id}.json"
+    url = f"{timelines_base(hub_url)}/{content_id}.json"
     try:
         r = requests.get(url, timeout=30)
     except requests.RequestException as e:

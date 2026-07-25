@@ -48,6 +48,35 @@ def backend_token(backend: str) -> str:
     return jellyfin_token() if (backend or "").lower() == "jellyfin" else plex_token()
 
 
+DEFAULT_HUB = "https://hub.openxray.net"
+
+
 def hub_url() -> str:
-    """Community hub base URL (BYO: no default is shipped)."""
-    return _read(".huburl", "XRAY_HUB_URL", "hub_url").rstrip("/")
+    """Community hub base URL, defaulting to the project's own hub.
+
+    This is the API host: uploads, moderation, and the manifest. DOWNLOADS
+    go wherever that manifest's `timelines` base points (currently the CDN),
+    so nobody configures the CDN directly and it can move without a client
+    release.
+
+    Still overridable, because pointing the stack at a hub on localhost is
+    how the hub itself gets developed and tested. Set it to "-" to run with
+    no hub at all."""
+    configured = _read(".huburl", "XRAY_HUB_URL", "hub_url").strip()
+    if configured == "-":
+        return ""
+    return (configured or DEFAULT_HUB).rstrip("/")
+
+
+def hub_autoshare() -> bool:
+    """Whether finished timelines are uploaded to the hub automatically.
+
+    OFF unless explicitly turned on. Indexing is a private act; publishing
+    is not, and which titles you hold is disclosed by the upload itself. So
+    this is a decision the operator makes once and on purpose, never a
+    default that arrives with an install.
+
+    Stored as a string because settings_store coerces values with str():
+    a real False would round-trip to the truthy "False"."""
+    return _read(".hubautoshare", "XRAY_HUB_AUTOSHARE",
+                 "hub_autoshare").strip().lower() in ("1", "on", "true", "yes")
