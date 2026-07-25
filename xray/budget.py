@@ -1,7 +1,12 @@
 """AudD spend guard: a persisted monthly call counter next to the store.
 
 The music pass asks for headroom before identifying cues and records what it
-actually spent. Ceiling 0 = unlimited (the default is AudD's free tier).
+actually spent. Ceiling 0 = unlimited.
+
+The cap is OURS, not AudD's. AudD includes 300 free requests once, at signup,
+then bills $5/1,000; there is no recurring free tier and no monthly minimum.
+The default below matches that one-time allowance only so a fresh install
+cannot spend money by accident. Every call past it is billed.
 """
 from __future__ import annotations
 
@@ -10,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 FILENAME = "audd_budget.json"
-DEFAULT_MONTHLY = 300  # AudD free tier
+DEFAULT_MONTHLY = 300  # = AudD's one-time signup allowance; see module note
 
 
 def _month() -> str:

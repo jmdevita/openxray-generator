@@ -41,10 +41,15 @@ Then everything happens in the browser:
    list. Or connect **Jellyfin** via Quick Connect (enter a code in your
    Jellyfin UI) or username/password.
 2. Enter a **TMDb key** (free at themoviedb.org) and optionally an **AudD
-   token** (music naming, paid) in Settings.
-3. **Run**: search a title or queue a whole library. Check *level-0 seed*
-   for the video-free fast tier (cast + bios + trivia, seconds per title);
-   uncheck it for the full face-interval index.
+   token** (music naming, paid). Until a server and a TMDb key both exist,
+   the dashboard shows only this checklist: no run could succeed without
+   them.
+3. **Run**: search a title, or pick a whole library. Choosing a library
+   reports what you already have (indexed locally, seeded, or already on the
+   hub) and prices both tiers over what is actually left. *Quick seed* is
+   video-free (cast + bios + trivia, seconds per title); *Full index* adds
+   per-actor face intervals and music. Seeding first is not wasted work: a
+   later full run upgrades a seed in place.
 
 Timelines land in the `timelines` volume; point Plezy's *X-Ray → Timelines
 folder/URL* at it (or serve it with a hub). Export, hub-upload, import,
