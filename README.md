@@ -6,6 +6,14 @@ what's worth knowing, moment by moment. Rendered as an X-Ray-style overlay in
 
 *Not affiliated with, endorsed by, or connected to Amazon.*
 
+![The generator planning a full index: a coverage bar splitting a library into
+already-indexed, seeded, available on the hub, and not yet indexed; below it
+two tiers, Quick seed and Full index, each priced over only the work that is
+left.](assets/dashboard.png)
+
+<sub>Planning a run before starting it. Figures from a demo library, not a
+real one.</sub>
+
 ## Just want to use it?
 
 Point Plezy at the public hub. No install, no API key, nothing to run:
