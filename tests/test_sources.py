@@ -37,10 +37,13 @@ def fake_get(path, **params):
             return {"Items": [ITEMS[params["ids"]]]}
         if "searchTerm" in params:
             return {"Items": [ITEMS["m1"], ITEMS["e1"]]}
-        if params.get("ParentId") == "lib1":
+        pid, itype = params.get("ParentId"), params.get("IncludeItemTypes")
+        if pid == "lib1":
             return {"Items": [ITEMS["m1"]]}
-        if params.get("ParentId") == "lib2":
-            return {"Items": [ITEMS["e1"]]}
+        if pid == "lib2":
+            # content_ids() asks this section for Series and Episodes
+            # separately; section_leaves() only ever asks for Episodes.
+            return {"Items": [ITEMS["s1"] if itype == "Series" else ITEMS["e1"]]}
         if params.get("IncludeItemTypes") == "Movie":
             return {"Items": [ITEMS["m1"]]}
         if params.get("IncludeItemTypes") == "Series":
@@ -72,6 +75,12 @@ class FakeSource:
 
     def section_leaves(self, section_key):
         return [{"ratingKey": "a"}, {"ratingKey": "b"}, {"ratingKey": "c"}]
+
+    def content_ids(self, section_key):
+        return {"a": "tmdb-movie-1", "b": "tmdb-movie-2", "c": None}
+
+    def series_leaves(self, series_id):
+        return [{"ratingKey": "e1"}, {"ratingKey": "e2"}]
 
     def resolve(self, item_id):
         self.resolved.append(item_id)
@@ -157,12 +166,100 @@ class TestJellyfinAdapter(unittest.TestCase):
         self.assertIsNone(jf.episode_id("s1", 9, 9))
 
 
+class TestJellyfinContentIds(unittest.TestCase):
+    def test_movies_come_from_provider_ids(self):
+        self.assertEqual(make_jf().content_ids("Movies"),
+                         {"m1": "tmdb-movie-769"})
+
+    def test_episodes_use_the_SERIES_tmdb_id(self):
+        # The episode's own ProviderIds are empty on purpose: identity has to
+        # come from the series, or every show in a library reads as unmatched.
+        self.assertEqual(make_jf().content_ids("Shows"),
+                         {"e1": "tmdb-tv-66732-s01e01"})
+
+
+# --- canned Plex payloads -----------------------------------------------------
+
+def _md(rk, **kw):
+    return {"ratingKey": rk, **kw}
+
+
+PLEX_SECTIONS = {"MediaContainer": {"Directory": [
+    {"key": "1", "title": "Movies", "type": "movie"},
+    {"key": "2", "title": "Shows", "type": "show"}]}}
+
+
+def make_plex(guids=True):
+    """A Plex adapter whose section listings honour includeGuids (or don't)."""
+    px = PlexServer("http://plex.local", "TOK")
+    guid = [{"id": "tmdb://769"}]
+
+    def fake_get(path, **params):
+        if path == "/library/sections":
+            return PLEX_SECTIONS
+        if path == "/library/sections/1/all":
+            return {"MediaContainer": {"Metadata": [
+                _md("11", Guid=guid if guids else None, title="Casino"),
+                _md("12", title="Home Video")]}}      # never matched
+        if path == "/library/sections/2/all":
+            if params.get("type") == 2:
+                return {"MediaContainer": {"Metadata": [
+                    _md("20", Guid=[{"id": "tmdb://66732"}] if guids else None)]}}
+            return {"MediaContainer": {"Metadata": [
+                _md("21", grandparentRatingKey="20", parentIndex=1, index=1),
+                _md("22", grandparentRatingKey="99", parentIndex=1, index=2)]}}
+        raise AssertionError(f"unexpected Plex call: {path} {params}")
+
+    px._get = fake_get
+    return px
+
+
+class TestPlexContentIds(unittest.TestCase):
+    def test_movies_from_one_listing(self):
+        self.assertEqual(make_plex().content_ids("Movies"),
+                         {"11": "tmdb-movie-769", "12": None})
+
+    def test_episodes_join_against_the_show_map(self):
+        # "22" hangs off a show that isn't in the section listing, so it has
+        # no identity: the pipeline would skip it, and the plan must say so.
+        self.assertEqual(make_plex().content_ids("Shows"),
+                         {"21": "tmdb-tv-66732-s01e01", "22": None})
+
+    def test_falls_back_when_the_server_ignores_includeGuids(self):
+        px = make_plex(guids=False)
+        # Probe + per-item metadata: an old server still gets real answers.
+        px.metadata = lambda rk: ({"Guid": [{"id": "tmdb://769"}]}
+                                  if rk == "11" else {})
+        self.assertEqual(px.content_ids("Movies"),
+                         {"11": "tmdb-movie-769", "12": None})
+
+    def test_genuinely_unmatched_library_does_not_trigger_the_slow_path(self):
+        px = make_plex(guids=False)
+        calls = []
+
+        def metadata(rk):
+            calls.append(rk)
+            return {}          # the probe agrees: nothing is matched
+        px.metadata = metadata
+        self.assertEqual(px.content_ids("Movies"), {"11": None, "12": None})
+        self.assertEqual(calls, ["11"], "should probe once, not walk the library")
+
+
 class TestPipelineIsBackendAgnostic(unittest.TestCase):
     def test_enumerate_library_respects_max(self):
         fs = FakeSource()
         self.assertEqual(
             pipeline.enumerate_targets(fs, library="X", max_titles=2),
             ["a", "b"])
+
+    def test_enumerate_series_takes_the_whole_show(self):
+        self.assertEqual(
+            pipeline.enumerate_targets(FakeSource(), series="s1"), ["e1", "e2"])
+
+    def test_enumerate_series_respects_max(self):
+        self.assertEqual(
+            pipeline.enumerate_targets(FakeSource(), series="s1", max_titles=1),
+            ["e1"])
 
     def test_enumerate_rating_key_passthrough(self):
         self.assertEqual(

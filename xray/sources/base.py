@@ -45,6 +45,27 @@ class MediaSource(Protocol):
         """Every playable item in a section (movies / episodes), lightweight."""
         ...
 
+    def series_leaves(self, series_id: str) -> list[dict]:
+        """Every episode of ONE series, lightweight.
+
+        Sits between a single episode and a whole library: "index this show"
+        is the natural unit for TV, and without it a 60-episode run means 60
+        separate queue actions."""
+        ...
+
+    def content_ids(self, section_key: str) -> dict[str, str | None]:
+        """{backend item id: content id or None} for a whole section.
+
+        Identity in bulk, and it has to stay CHEAP: this exists so the UI can
+        answer "what do I already have, and what would the rest cost?" before
+        the user commits to a run. Implementations get it in one or two
+        requests by asking the backend for external ids inline with the
+        listing; resolving 400 titles one at a time is what it avoids.
+
+        None means the backend has no TMDb match for that item, so it has no
+        content identity and run_title() will skip it."""
+        ...
+
     def resolve(self, item_id: str) -> dict:
         """Everything the indexer needs for one item: see the item dict above."""
         ...

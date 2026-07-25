@@ -81,6 +81,8 @@ class JellyfinServer:
             "grandparentTitle": it.get("SeriesName"),
             "season": it.get("ParentIndexNumber"),
             "episode": it.get("IndexNumber"),
+            # Lets a caller offer "the whole show" next to one episode.
+            "seriesId": str(it["SeriesId"]) if it.get("SeriesId") else None,
         }
 
     def search(self, query: str, limit: int = 12) -> list[dict]:
@@ -100,16 +102,58 @@ class JellyfinServer:
                         "type": typ})
         return out
 
-    def section_leaves(self, section_key: str) -> list[dict]:
+    def _section(self, section_key: str) -> dict:
         sec = next((s for s in self.sections()
                     if s["key"] == str(section_key) or s["title"] == section_key),
                    None)
         if sec is None:
             raise ValueError(f"no library section {section_key!r}")
+        return sec
+
+    def section_leaves(self, section_key: str) -> list[dict]:
+        sec = self._section(section_key)
         item_type = "Episode" if sec["type"] == "show" else "Movie"
         data = self._get("/Items", ParentId=sec["key"], Recursive="true",
                          IncludeItemTypes=item_type, Fields="ProviderIds")
         return [self._normalize(it) for it in data.get("Items", [])]
+
+    def series_leaves(self, series_id: str) -> list[dict]:
+        """Every episode of one show (MediaSource seam)."""
+        data = self._get(f"/Shows/{series_id}/Episodes", Fields="ProviderIds")
+        return [self._normalize(it) for it in data.get("Items", [])]
+
+    def content_ids(self, section_key: str) -> dict[str, str | None]:
+        """{itemId: contentId|None} for a whole section (MediaSource seam).
+
+        Jellyfin returns provider ids inline with any listing, so this is one
+        request for movies. Episodes need the SERIES' TMDb id (their own is
+        the episode's), hence a second listing of the section's series."""
+        from .. import store as st
+        sec = self._section(section_key)
+
+        if sec["type"] != "show":
+            data = self._get("/Items", ParentId=sec["key"], Recursive="true",
+                             IncludeItemTypes="Movie", Fields="ProviderIds")
+            out = {}
+            for it in data.get("Items", []):
+                tmdb = self._tmdb_of(it)
+                out[str(it.get("Id"))] = st.movie_content_id(tmdb) if tmdb else None
+            return out
+
+        series = self._get("/Items", ParentId=sec["key"], Recursive="true",
+                           IncludeItemTypes="Series", Fields="ProviderIds")
+        show_tmdb = {str(s.get("Id")): self._tmdb_of(s)
+                     for s in series.get("Items", [])}
+        eps = self._get("/Items", ParentId=sec["key"], Recursive="true",
+                        IncludeItemTypes="Episode", Fields="ProviderIds")
+        out = {}
+        for it in eps.get("Items", []):
+            tmdb = show_tmdb.get(str(it.get("SeriesId")))
+            season, episode = it.get("ParentIndexNumber"), it.get("IndexNumber")
+            out[str(it.get("Id"))] = (
+                st.episode_content_id(tmdb, season, episode)
+                if tmdb and season is not None and episode is not None else None)
+        return out
 
     def resolve(self, item_id: str) -> dict:
         """Everything the indexer needs for one item (movie or episode)."""

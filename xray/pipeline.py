@@ -18,10 +18,17 @@ from .sources.base import MediaSource
 
 def enumerate_targets(source: MediaSource, *, rating_key: str | None = None,
                       search: str | None = None, library: str | None = None,
+                      series: str | None = None,
                       max_titles: int = 0) -> list[str]:
     from .passes import index_title
     if library:
         leaves = source.section_leaves(library)
+    elif series:
+        # The natural unit for TV: between one episode and a whole library.
+        leaves = source.series_leaves(series)
+    else:
+        leaves = None
+    if leaves is not None:
         if max_titles:
             leaves = leaves[:max_titles]
         return [leaf["ratingKey"] for leaf in leaves]
@@ -30,7 +37,7 @@ def enumerate_targets(source: MediaSource, *, rating_key: str | None = None,
     if search:
         return [index_title.resolve(source, rating_key=None,
                                     search=search)["ratingKey"]]
-    raise ValueError("need rating_key, search, or library")
+    raise ValueError("need rating_key, search, library, or series")
 
 
 def run_title(store: Path, *, source: MediaSource, tmdb_key: str,
