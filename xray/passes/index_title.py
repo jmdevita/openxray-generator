@@ -44,6 +44,15 @@ def merge_preserved(old: dict, new: dict) -> dict:
     work, because losing them on re-index would throw away paid AudD calls and
     cached enrichment. Person data merges by actorId (cast lists can shift
     between TMDb snapshots)."""
+    # A seed must never overwrite an index. run_level0 writes empty intervals
+    # and no faces stamp by design, so without this a level-0 pass across a
+    # library silently downgrades every title already indexed — throwing away
+    # the minutes of frame decoding and face embedding that produced them.
+    # "New has no faces stamp" is exactly what distinguishes a seed from a
+    # re-index, which does regenerate both and must be allowed to replace them.
+    if "faces" not in (new.get("provenance") or {}) and "faces" in (old.get("provenance") or {}):
+        new["actorIntervals"] = old.get("actorIntervals") or []
+        new.setdefault("provenance", {})["faces"] = old["provenance"]["faces"]
     for block in ("musicIntervals", "trivia"):
         if old.get(block):
             new[block] = old[block]

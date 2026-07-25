@@ -90,5 +90,83 @@ class TestUpgradePreservesLabels(unittest.TestCase):
         self.assertEqual(merge_preserved(old, new)["title"], "Corrected Name")
 
 
+def indexed(**over):
+    """A fully indexed timeline: face intervals and a faces stamp."""
+    doc = {"contentId": "tmdb-tv-62852-s01e01",
+           "actorIntervals": [{"actorId": "tmdb:1", "startMs": 0, "endMs": 9,
+                               "confidence": 0.9}] * 239,
+           "musicIntervals": [{"title": "Layla", "startMs": 0, "endMs": 5}],
+           "trivia": [{"text": "A fact."}],
+           "provenance": {"faces": {"generated": "2026-07-20T00:00:00Z",
+                                    "version": "sface-v1"},
+                          "music": {"generated": "…", "version": "audd-v1"}}}
+    doc.update(over)
+    return doc
+
+
+def seed(**over):
+    """What run_level0 writes: cast and labels, no intervals, no faces stamp."""
+    doc = {"contentId": "tmdb-tv-62852-s01e01", "actorIntervals": [],
+           "musicIntervals": [], "trivia": [], "provenance": {},
+           "title": "Pilot", "year": 2016, "series": "Billions"}
+    doc.update(over)
+    return doc
+
+
+class TestASeedNeverOverwritesAnIndex(unittest.TestCase):
+    """A level-0 pass over a library must not undo the video work.
+
+    run_level0 writes empty intervals and no faces stamp by design, and every
+    write goes through merge_preserved. Without a guard there, seeding a title
+    that was already indexed throws away minutes of frame decoding and face
+    embedding — and says nothing about it."""
+
+    def test_face_intervals_survive_a_seed(self):
+        self.assertEqual(len(merge_preserved(indexed(), seed())["actorIntervals"]),
+                         239)
+
+    def test_the_faces_stamp_survives_a_seed(self):
+        merged = merge_preserved(indexed(), seed())
+        self.assertEqual(merged["provenance"]["faces"]["version"], "sface-v1")
+
+    def test_the_seed_still_contributes_its_labels(self):
+        """The reason to re-seed an indexed title at all: it backfills labels."""
+        merged = merge_preserved(indexed(), seed())
+        self.assertEqual((merged["series"], merged["title"], merged["year"]),
+                         ("Billions", "Pilot", 2016))
+
+    def test_a_real_reindex_still_replaces_intervals(self):
+        """The guard keys off the absence of a faces stamp, so an actual
+        re-index — which writes both — is unaffected."""
+        fresh = seed(actorIntervals=[{"actorId": "tmdb:2", "startMs": 0,
+                                      "endMs": 5, "confidence": 0.8}],
+                     provenance={"faces": {"generated": "2026-07-25T00:00:00Z",
+                                           "version": "sface-v2"}})
+        merged = merge_preserved(indexed(), fresh)
+        self.assertEqual(len(merged["actorIntervals"]), 1)
+        self.assertEqual(merged["provenance"]["faces"]["version"], "sface-v2")
+
+    def test_paid_and_cached_work_survives_either_way(self):
+        reindex = seed(actorIntervals=[{"actorId": "tmdb:2", "startMs": 0,
+                                        "endMs": 5, "confidence": 0.8}],
+                       provenance={"faces": {"generated": "x",
+                                             "version": "sface-v2"}})
+        for new in (seed(), reindex):
+            merged = merge_preserved(indexed(), new)
+            self.assertEqual(len(merged["musicIntervals"]), 1, new)
+            self.assertEqual(len(merged["trivia"]), 1, new)
+
+    def test_seeding_a_title_that_does_not_exist_yet_is_a_plain_seed(self):
+        merged = merge_preserved({}, seed())
+        self.assertEqual(merged["actorIntervals"], [])
+        self.assertNotIn("faces", merged.get("provenance", {}))
+
+    def test_reseeding_a_seed_stays_a_seed(self):
+        """No faces on either side: nothing to protect, nothing invented."""
+        merged = merge_preserved(seed(title="Old"), seed())
+        self.assertEqual(merged["actorIntervals"], [])
+        self.assertNotIn("faces", merged.get("provenance", {}))
+
+
 if __name__ == "__main__":
     unittest.main()
