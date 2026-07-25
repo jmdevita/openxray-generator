@@ -780,6 +780,13 @@ _STYLE = """<style>
   border-radius:4px;background:var(--wash);color:var(--accent)}
  .chip.off{background:transparent;color:var(--faint);
   box-shadow:inset 0 0 0 1px var(--soft)}
+ /* A missing block you can fill: dashed to read as an absence, not a state.
+    Only rendered when the title has a server key to run against. */
+ button.chip{border:0;cursor:pointer;font-family:var(--mono)}
+ button.chip.add{background:transparent;color:var(--accent);
+  box-shadow:inset 0 0 0 1px var(--soft)}
+ button.chip.add:hover{background:var(--wash)}
+ button.chip.add.paid{color:var(--warn)}
  .note{display:flex;justify-content:space-between;align-items:center;gap:1rem;
   flex-wrap:wrap;padding:.7rem .9rem;border-radius:8px;background:var(--wash);
   font-size:13px;color:var(--accent)}
@@ -844,6 +851,7 @@ document.addEventListener('click', ev => {
  if(d.act === 'series') return queueSeries(d.sid, +d.level);
  if(d.act === 'share')  return hubUpload(d.cid);
  if(d.act === 'bundle') return exportBundle(el);
+ if(d.act === 'pass')   return queuePass(d.rk, d.pass, d.label);
  if(d.act === 'log')    return showLog(+d.id);
 });
 const j = r => r.json();
@@ -1204,6 +1212,25 @@ async function queueOne(ratingKey, level){
  poll();
 }
 
+// The pipeline's four passes. Running one alone is "skip the other three",
+// which is the same `skip` a whole-library run already takes — so a single
+// pass on one title needs no endpoint of its own.
+const PASSES = ['index', 'people', 'trivia', 'music'];
+
+async function queuePass(ratingKey, pass, label){
+ // Money is the only thing worth interrupting for; the free passes just run.
+ if(pass === 'music' && !confirm(
+      'Identify songs in ' + (label || 'this title') + '?\n\n'
+      + 'Billed per music cue, about $0.005 each — roughly $0.10–$0.20 '
+      + 'for a feature film. The other passes are free.')) return;
+ const r = await post('api/run', {
+   rating_key: ratingKey, level: 1,
+   skip: PASSES.filter(p => p !== pass).join(',')});
+ if(!r.ok) return alert((await r.json()).detail);
+ $('results').innerHTML = ''; $('q').value = '';
+ poll();
+}
+
 // ---- jobs ------------------------------------------------------------------
 
 const STEP_LABEL = {index:'indexing', people:'cast', trivia:'trivia', music:'music'};
@@ -1270,14 +1297,32 @@ async function loadStore(){
   + ' · AudD ' + s.auddUsed + '/' + (s.auddMonthly || '∞') + ' this month';
  const seeds = s.titles.filter(t => !t.blocks.faces).length;
  const rows = s.titles.map(t => {
-  const chip = (name, on) => '<span class="chip' + (on ? '' : ' off') + '">'
-   + name + '</span>';
   const rk = (t.lookup[0] || '').split(':')[1];
+  // A present block is a state; a missing one is an offer. Filling it runs
+  // that pass ALONE (skip = the other three), which is why every block is
+  // offered and not just the paid one — the pipeline already takes `skip`,
+  // this only stops the dashboard hardcoding it to music-or-nothing.
+  //
+  // Needs a server key: every pass runs through the pipeline against the
+  // media server, so a timeline fetched from the hub with no local copy has
+  // nothing to run against and stays a plain chip.
+  const chip = (label, pass, on, paid) => {
+   if (on) return '<span class="chip">' + label + '</span>';
+   if (!rk) return '<span class="chip off">' + label + '</span>';
+   return '<button class="chip add' + (paid ? ' paid' : '') + '"'
+    + ' data-act="pass" data-rk="' + esc(rk) + '" data-pass="' + pass + '"'
+    + ' data-label="' + esc(storeLabel(t).replace(/<[^>]*>/g, '')) + '"'
+    + ' title="' + (paid
+       ? 'Identify songs — billed per cue, about $0.10–0.20 for a feature'
+       : 'Add ' + label + ' to this title — free') + '">+ ' + label + '</button>';
+  };
   return '<tr><td>' + storeLabel(t)
    + '<div class="mono">' + esc(t.contentId) + '</div>'
    + '</td><td><div class="chips">'
-   + chip('cast', t.blocks.people) + chip('faces', t.blocks.faces)
-   + chip('music', t.blocks.music) + chip('trivia', t.blocks.trivia)
+   + chip('cast', 'people', t.blocks.people)
+   + chip('faces', 'index', t.blocks.faces)
+   + chip('music', 'music', t.blocks.music, true)
+   + chip('trivia', 'trivia', t.blocks.trivia)
    + '</div></td><td class="acts">'
    + (!t.blocks.faces && rk
       ? '<button class="ghost sm" data-act="queue" data-rk="' + esc(rk)
