@@ -29,6 +29,7 @@ MOVIE = {
     "ratingKey": "288", "type": "movie", "title": "Casino",
     "durationMs": 10680000, "tmdbId": "769",
 }
+LABELS = {"title": "Casino", "year": 1995, "series": None}
 CAST = [
     {"actorId": "tmdb:380", "name": "Robert De Niro", "character": "Ace",
      "thumb": "https://image.tmdb.org/t/p/w342/x.jpg", "images": []},
@@ -62,10 +63,12 @@ class TestLevel0Birth(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _seed(self):
+    def _seed(self, labels=None):
         from xray import refs as refsmod
+        bundle = {"cast": CAST,
+                  "labels": LABELS if labels is None else labels}
         with _patch([
-            (refsmod, "cast_from_tmdb", lambda *a, **k: CAST),
+            (refsmod, "movie_bundle", lambda *a, **k: bundle),
         ]):
             return index_title.run_level0(
                 self.store, source=FakeSource(MOVIE), tmdb_key="KEY",
@@ -83,6 +86,21 @@ class TestLevel0Birth(unittest.TestCase):
         # No faces provenance: that absence is the level-0 marker.
         self.assertNotIn("faces", doc.get("provenance") or {})
         self.assertEqual(doc["sourceRuntimeMs"], 10680000)
+
+    def test_seed_carries_the_display_labels(self):
+        self._seed()
+        doc = json.loads((self.store / "tmdb-movie-769.json").read_text())
+        self.assertEqual(doc["title"], "Casino")
+        self.assertEqual(doc["year"], 1995)
+        self.assertNotIn("series", doc)   # a film has no show
+
+    def test_labels_are_omitted_when_unknown_not_written_as_null(self):
+        # Absent reads as "unknown"; a null invites clients to render "".
+        self._seed(labels={"title": None, "year": None, "series": None})
+        doc = json.loads((self.store / "tmdb-movie-769.json").read_text())
+        for key in ("title", "year", "series"):
+            self.assertNotIn(key, doc)
+        st.validate(doc)
 
     def test_seed_validates_against_the_contract(self):
         self._seed()

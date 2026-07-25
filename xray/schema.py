@@ -19,8 +19,14 @@ def now_iso() -> str:
     )
 
 
+#: Longest display label accepted, matching the schema's maxLength. These
+#: strings render on public pages, so the cap is enforced where they are
+#: written rather than trusted to whoever produced them.
+LABEL_MAX = 200
+
+
 def timeline(content_id, cast, actor_intervals=None, model_version=None,
-             duration_ms=None):
+             duration_ms=None, labels=None):
     """Assemble a timeline dict (plan.md §3).
 
     Empty actor_intervals is a valid v1 doc (full-cast panel); the whole point
@@ -30,6 +36,10 @@ def timeline(content_id, cast, actor_intervals=None, model_version=None,
     enter the doc; the store manifest owns that mapping. `provenance` gains
     per-block stamps as enrichers run; model_version lands there, not at the
     top level.
+
+    `labels` carries the optional human-facing {title, year, series}. They are
+    for reading, never for matching, and are omitted entirely when unknown so
+    a timeline never claims a title it does not have.
     """
     from . import __version__
     if not content_id:
@@ -47,7 +57,25 @@ def timeline(content_id, cast, actor_intervals=None, model_version=None,
         "musicIntervals": [],
         "trivia": [],
     }
+    doc.update(display_labels(labels))
     if model_version:
         doc["provenance"]["faces"] = {"generated": doc["generated"],
                                       "version": model_version}
     return doc
+
+
+def display_labels(labels) -> dict:
+    """The {title, year, series} subset worth writing, cleaned and capped.
+
+    Absent beats null: a key that isn't there reads as "unknown", whereas a
+    null invites clients to render an empty string. Blank strings and a
+    `series` on a film both drop out here rather than at each call site."""
+    out = {}
+    for key in ("title", "series"):
+        value = ((labels or {}).get(key) or "").strip()
+        if value:
+            out[key] = value[:LABEL_MAX]
+    year = (labels or {}).get("year")
+    if isinstance(year, int) and year >= 1870:
+        out["year"] = year
+    return out

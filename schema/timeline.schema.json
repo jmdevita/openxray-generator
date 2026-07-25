@@ -19,6 +19,30 @@
       "pattern": "^tmdb-(movie-[0-9]+|tv-[0-9]+-s[0-9]{2}e[0-9]{2})$",
       "description": "Canonical content identity; also the filename stem in the store."
     },
+    "title": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 200,
+      "description": "Display title: a film's title, or an episode's own name. For humans only; identity is always contentId. Absent when the source had no match."
+    },
+    "year": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1870,
+      "description": "Release year, or an episode's first air year."
+    },
+    "series": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 200,
+      "description": "Show name, episodes only; absent for films. Needed because an episode's title is just its own name ('Pilot'), which cannot identify it in a catalog. Season and episode numbers are NOT repeated here: they are already in contentId."
+    },
     "version": {
       "const": 1
     },

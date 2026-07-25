@@ -47,6 +47,11 @@ def merge_preserved(old: dict, new: dict) -> dict:
     for block in ("musicIntervals", "trivia"):
         if old.get(block):
             new[block] = old[block]
+    # Display labels are re-fetched on every index, but a bad TMDb response
+    # must not silently strip a title the timeline already carried.
+    for key in ("title", "year", "series"):
+        if key not in new and old.get(key):
+            new[key] = old[key]
     old_prov = old.get("provenance") or {}
     for block in ("music", "trivia", "people"):
         if block in old_prov:
@@ -124,10 +129,12 @@ def run(store_dir: Path, work_dir: Path, *, source: MediaSource,
             "and cannot be indexed (check the library's metadata agent)")
 
     if item["type"] == "episode":
-        cast = refsmod.cast_from_tmdb_tv(item["showTmdbId"], tmdb_key,
-                                         season=item["season"], episode=item["episode"])
+        bundle = refsmod.episode_bundle(item["showTmdbId"], tmdb_key,
+                                        season=item["season"],
+                                        episode=item["episode"])
     else:
-        cast = refsmod.cast_from_tmdb(item["tmdbId"], tmdb_key)
+        bundle = refsmod.movie_bundle(item["tmdbId"], tmdb_key)
+    cast, labels = bundle["cast"], bundle["labels"]
 
     if dry_run:
         print(f"[dry-run] would index → {content_id or item['ratingKey']} "
@@ -193,7 +200,7 @@ def run(store_dir: Path, work_dir: Path, *, source: MediaSource,
 
     doc = schema.timeline(content_id, refsmod.public_cast(cast),
                           intervals, model_version,
-                          duration_ms=item.get("durationMs"))
+                          duration_ms=item.get("durationMs"), labels=labels)
 
     dest = _write_doc(store_dir, item, content_id, doc, source.key_prefix)
 
@@ -225,8 +232,8 @@ def run_level0(store_dir: Path, *, source, tmdb_key: str,
                dry_run: bool = False) -> dict:
     """Level-0 seed: birth a timeline with NO video work at all.
 
-    Cast list from TMDb credits (thumb-only, no per-person image calls),
-    title/year from Wikidata (CC0, safe to share), empty interval arrays
+    Cast list and display labels from TMDb in one request per title
+    (thumb-only, no per-person image calls), empty interval arrays
     (clients render the full-cast panel), runtime from server metadata.
     Seconds per title, so a whole library seeds in minutes; the people and
     trivia passes then enrich it like any other timeline. A later full index
@@ -244,11 +251,12 @@ def run_level0(store_dir: Path, *, source, tmdb_key: str,
             "and cannot be seeded (check the library's metadata agent)")
 
     if item["type"] == "episode":
-        cast = refsmod.cast_from_tmdb_tv(item["showTmdbId"], tmdb_key,
-                                         season=item["season"],
-                                         episode=item["episode"], max_images=0)
+        bundle = refsmod.episode_bundle(item["showTmdbId"], tmdb_key,
+                                        season=item["season"],
+                                        episode=item["episode"], max_images=0)
     else:
-        cast = refsmod.cast_from_tmdb(item["tmdbId"], tmdb_key, max_images=0)
+        bundle = refsmod.movie_bundle(item["tmdbId"], tmdb_key, max_images=0)
+    cast, labels = bundle["cast"], bundle["labels"]
 
     if dry_run:
         print(f"[dry-run] would seed → {content_id or item['ratingKey']} "
@@ -258,7 +266,7 @@ def run_level0(store_dir: Path, *, source, tmdb_key: str,
 
     doc = schema.timeline(content_id, refsmod.public_cast(cast),
                           [], None,
-                          duration_ms=item.get("durationMs"))
+                          duration_ms=item.get("durationMs"), labels=labels)
 
     dest = _write_doc(store_dir, item, content_id, doc, source.key_prefix)
     print(f"[out] level-0 seed {dest.stem} ({len(cast)} cast) → {dest.name}")

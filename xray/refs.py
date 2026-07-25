@@ -76,14 +76,39 @@ def _tmdb_member(pid, name, character, profile_path, api_key, max_images):
     }
 
 
+def _year(date_str):
+    """Leading year of a TMDb date ("1990-09-19" -> 1990), or None."""
+    head = (date_str or "")[:4]
+    return int(head) if head.isdigit() else None
+
+
+def movie_bundle(tmdb_id, api_key, max_images=5, max_cast=60, timeout=20):
+    """Credits AND display labels for a film, in ONE request.
+
+    `append_to_response=credits` folds the credits payload into the details
+    call, so picking up title/year costs no extra round trip: it is the same
+    request the cast always needed, at a different URL."""
+    r = requests.get(f"{TMDB}/movie/{tmdb_id}",
+                     params={"api_key": api_key,
+                             "append_to_response": "credits"}, timeout=timeout)
+    r.raise_for_status()
+    j = r.json()
+    members = sorted((j.get("credits") or {}).get("cast", []),
+                     key=lambda c: c.get("order", 999))
+    return {
+        "cast": [_tmdb_member(c["id"], c.get("name", ""), c.get("character", ""),
+                              c.get("profile_path"), api_key, max_images)
+                 for c in members[:max_cast]],
+        "labels": {"title": j.get("title") or j.get("original_title"),
+                   "year": _year(j.get("release_date")),
+                   "series": None},
+    }
+
+
 def cast_from_tmdb(tmdb_id, api_key, max_images=5, max_cast=60, timeout=20):
-    cr = requests.get(f"{TMDB}/movie/{tmdb_id}/credits",
-                      params={"api_key": api_key}, timeout=timeout)
-    cr.raise_for_status()
-    members = sorted(cr.json().get("cast", []), key=lambda c: c.get("order", 999))
-    return [_tmdb_member(c["id"], c.get("name", ""), c.get("character", ""),
-                         c.get("profile_path"), api_key, max_images)
-            for c in members[:max_cast]]
+    """Cast only; use movie_bundle when the display labels are wanted too."""
+    return movie_bundle(tmdb_id, api_key, max_images=max_images,
+                        max_cast=max_cast, timeout=timeout)["cast"]
 
 
 def search_tv(name, api_key, timeout=20):
@@ -93,34 +118,62 @@ def search_tv(name, api_key, timeout=20):
     return r.json().get("results", [])
 
 
-def cast_from_tmdb_tv(tv_id, api_key, season=1, episode=1, max_images=5,
-                      max_cast=40, timeout=20):
-    """Series regulars (aggregate_credits) + this episode's guest stars, deduped.
+def episode_bundle(tv_id, api_key, season=1, episode=1, max_images=5,
+                   max_cast=40, timeout=20):
+    """Series regulars + this episode's guest stars, AND display labels.
 
     A pilot's on-screen faces are the recurring leads plus episode-specific
-    guests; combining both gives the reference set Spike 1 labels against.
+    guests; combining both gives the reference set the labeller works against.
+
+    Still the same two requests as before: `append_to_response` hangs the
+    credits off the series and episode details calls, so the show name and
+    the episode name arrive for free. `series` is the show's name and `title`
+    is the episode's own, because an episode called "Pilot" cannot be
+    identified without both.
     """
     people = {}  # pid -> (name, character, profile_path, order)
-    ac = requests.get(f"{TMDB}/tv/{tv_id}/aggregate_credits",
-                      params={"api_key": api_key}, timeout=timeout)
+    labels = {"title": None, "year": None, "series": None}
+
+    ac = requests.get(f"{TMDB}/tv/{tv_id}",
+                      params={"api_key": api_key,
+                              "append_to_response": "aggregate_credits"},
+                      timeout=timeout)
     if ac.ok:
-        for c in ac.json().get("cast", []):
+        j = ac.json()
+        labels["series"] = j.get("name") or j.get("original_name")
+        for c in (j.get("aggregate_credits") or {}).get("cast", []):
             char = c["roles"][0].get("character", "") if c.get("roles") else ""
             people[c["id"]] = (c.get("name", ""), char, c.get("profile_path"),
                                c.get("order", 999))
     if season and episode:
         ec = requests.get(
-            f"{TMDB}/tv/{tv_id}/season/{season}/episode/{episode}/credits",
-            params={"api_key": api_key}, timeout=timeout)
+            f"{TMDB}/tv/{tv_id}/season/{season}/episode/{episode}",
+            params={"api_key": api_key, "append_to_response": "credits"},
+            timeout=timeout)
         if ec.ok:
             j = ec.json()
-            for c in j.get("cast", []) + j.get("guest_stars", []):
+            labels["title"] = j.get("name")
+            labels["year"] = _year(j.get("air_date"))
+            credits = j.get("credits") or {}
+            for c in (credits.get("cast", []) + credits.get("guest_stars", [])
+                      + j.get("guest_stars", [])):
                 people.setdefault(c["id"], (c.get("name", ""),
                                             c.get("character", ""),
                                             c.get("profile_path"), 500))
     ordered = sorted(people.items(), key=lambda kv: kv[1][3])[:max_cast]
-    return [_tmdb_member(pid, n, ch, pp, api_key, max_images)
-            for pid, (n, ch, pp, _order) in ordered]
+    return {
+        "cast": [_tmdb_member(pid, n, ch, pp, api_key, max_images)
+                 for pid, (n, ch, pp, _order) in ordered],
+        "labels": labels,
+    }
+
+
+def cast_from_tmdb_tv(tv_id, api_key, season=1, episode=1, max_images=5,
+                      max_cast=40, timeout=20):
+    """Cast only; use episode_bundle when the display labels are wanted too."""
+    return episode_bundle(tv_id, api_key, season=season, episode=episode,
+                          max_images=max_images, max_cast=max_cast,
+                          timeout=timeout)["cast"]
 
 
 # --- reference embeddings -------------------------------------------------

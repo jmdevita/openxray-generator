@@ -32,6 +32,17 @@ Every pass validates before writing (`store.write_timeline`).
   "version": 1,                        // schema version; additive changes only
   "generated": "2026-07-18T03:11:58Z", // when the core (frames/faces) was built
 
+  // Display labels, OPTIONAL, from TMDb. For humans reading a catalog or a
+  // review queue; never for matching, which is always contentId. A player
+  // already knows what it is playing and should keep using its own metadata.
+  //   film:     "title": "Goodfellas", "year": 1990
+  //   episode:  "title": "Pilot",      "year": 2016, "series": "Billions"
+  // `series` exists because an episode's title alone ("Pilot", "Part One")
+  // cannot identify it. Season/episode numbers are NOT repeated here: they are
+  // already in contentId, and two copies of a fact can disagree.
+  "title": "Goodfellas",
+  "year": 1990,
+
   "provenance": {                      // per-block: who wrote it, when
     "faces":  { "generated": "…", "version": "sface-v1" },
     "people": { "generated": "…", "version": "tmdb-v1" },   // enrich_people.py
@@ -88,9 +99,18 @@ Every pass validates before writing (`store.write_timeline`).
    (validate → atomic write).
 4. **Times are ms, intervals half-open** `[startMs, endMs)`, matching Plezy's
    marker convention; converts losslessly to Jellyfin ticks (× 10,000).
-5. **TMDb person data is licensed, not owned**: refresh within 6 months
-   (`people_cache.json` timestamps + `--refresh-days`), attribute in UI
-   (Plezy detail footer does), and never redistribute enriched timelines.
+5. **TMDb data is licensed, not owned.** Person data (`cast[].person`, and
+   `thumb` URLs) is bulk curated content and never leaves the machine that
+   fetched it: share-safe export strips it, and recipients rehydrate with
+   their own key. Refresh within 6 months (`people_cache.json` timestamps +
+   `--refresh-days`) and attribute in the UI (Plezy's detail footer does).
+   `title`/`year`/`series` *do* travel, under the same terms: attribution,
+   no monetization, and removal on request (the hub has a takedown route).
+6. **Display labels are advisory.** `title`/`year`/`series` are for humans
+   reading a list. Matching is always `contentId` — never fuzzy-match a
+   title. They are also contributor-supplied strings that render on public
+   pages, so the hub length-caps them and scans them with the rest of the
+   free text.
 
 ## Size reality (2026-07-19)
 
