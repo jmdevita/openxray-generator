@@ -23,6 +23,11 @@ services:
     # the service names below (engine-audio, engine-faces), so the URLs hold.
     container_name: openxray-generator
     build: { context: .., dockerfile: generator/orchestrator.Dockerfile }
+    # All interfaces on purpose: the dashboard is meant to be opened from
+    # another machine on your LAN. Be aware Docker publishes ports by writing
+    # NAT rules, so this BYPASSES a host firewall (ufw included) -- firewalling
+    # the host does not close it. Narrow to 127.0.0.1:8080:8080 and put a
+    # reverse proxy in front if this host can reach anything untrusted.
     ports: ["8080:8080"]
     environment:
       PLEX_ORIGIN: ${PLEX_ORIGIN}

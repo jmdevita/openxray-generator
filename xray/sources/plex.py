@@ -1,8 +1,9 @@
 """Minimal Plex adapter (raw REST): resolve a title to what the indexer needs.
 
-For each item: the real Plex ratingKey (the key the extension resolves from
-/status/sessions), a direct-play HTTP URL ffmpeg can read the frames from (media
-is remote, so no local file), and the TMDb id (for cast references + trivia).
+For each item: the real Plex ratingKey (what /status/sessions reports, so a
+client can match what is playing), a direct-play HTTP URL ffmpeg can read the
+frames from (media is remote, so no local file), and the TMDb id (for cast
+references + trivia).
 """
 from __future__ import annotations
 

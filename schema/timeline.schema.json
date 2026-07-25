@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://hub.openxray.net/schema/timeline.schema.json",
   "title": "X-Ray timeline",
-  "description": "Per-title timeline produced by the indexer and enrichment passes; consumed by Plezy and the browser extension. Contract rules: additive evolution only (version stays 1), consumers ignore unknown fields, all times are ms from title start with half-open [startMs, endMs) intervals.",
+  "description": "Per-title timeline produced by the indexer and enrichment passes; consumed by Plezy. Contract rules: additive evolution only (version stays 1), consumers ignore unknown fields, all times are ms from title start with half-open [startMs, endMs) intervals.",
   "type": "object",
   "required": [
     "contentId",

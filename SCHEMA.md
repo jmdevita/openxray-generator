@@ -1,7 +1,7 @@
 # X-Ray Timeline: Data Contract
 
 The timeline JSON files **are the system**: the Generator's passes write
-them, clients (Plezy widget, browser extension) read them, and every feature is
+them, clients (the Plezy widget) read them, and every feature is
 an additive enrichment of the same files. No servers or databases sit in the
 data path. Machine-checkable version: [`schema/timeline.schema.json`](schema/timeline.schema.json).
 Every pass validates before writing (`store.write_timeline`).

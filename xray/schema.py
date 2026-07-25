@@ -1,7 +1,7 @@
 """Timeline JSON contract (plan.md §3): the indexer's output format.
 
-Mirrors extension/src/schema.js so the indexer and every client speak the same
-shape. The indexer's job is to FILL the intervals the clients render as empty.
+One shape for the indexer and every client. The indexer's job is to FILL the
+intervals a client renders as empty.
 """
 from __future__ import annotations
 
