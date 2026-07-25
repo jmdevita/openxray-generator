@@ -272,5 +272,35 @@ class TestPipelineIsBackendAgnostic(unittest.TestCase):
         self.assertEqual(fs.resolved, ["r9"])
 
 
+
+class TestItemIdsCannotBecomePaths(unittest.TestCase):
+    """Backend ids become URL path segments, and requests normalises "../"
+    instead of encoding it, so an unchecked id reaches arbitrary endpoints on
+    the media server carrying the operator's token."""
+
+    def test_traversal_and_junk_are_rejected(self):
+        from xray.sources.base import check_item_id
+        for bad in ("../../status/sessions", "a/b", "..", "", "a b", "x" * 100,
+                    "%2e%2e/x", None):
+            with self.assertRaises(ValueError):
+                check_item_id(bad)
+
+    def test_real_plex_and_jellyfin_ids_pass(self):
+        from xray.sources.base import check_item_id
+        for good in ("288", "3606", "billions-s1e1", "a1b2c3d4e5f6a7b8"):
+            self.assertEqual(check_item_id(good), good)
+
+    def test_series_leaves_refuses_a_traversing_id(self):
+        px = PlexServer("http://plex.local", "TOK")
+        px._get = lambda *a, **k: self.fail("should never reach the network")
+        with self.assertRaises(ValueError):
+            px.series_leaves("../../status/sessions")
+
+    def test_jellyfin_series_leaves_refuses_too(self):
+        jf = JellyfinServer("http://jf.local", "TOK")
+        jf._get = lambda *a, **k: self.fail("should never reach the network")
+        with self.assertRaises(ValueError):
+            jf.series_leaves("../../System/Info")
+
 if __name__ == "__main__":
     unittest.main()

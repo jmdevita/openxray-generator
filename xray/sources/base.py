@@ -27,7 +27,23 @@ kept under that name for the timeline schema):
 """
 from __future__ import annotations
 
+import re
 from typing import Protocol, runtime_checkable
+
+_ITEM_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def check_item_id(item_id: str) -> str:
+    """Return a backend item id, or raise ValueError.
+
+    These ids become URL PATH segments against the media server, and requests
+    normalises "../" instead of encoding it, so an unchecked id turns a
+    metadata lookup into an arbitrary call against that server carrying the
+    operator's token. Plex ids are numeric and Jellyfin's are hex, so an
+    alphanumeric allowlist costs nothing and closes the class outright."""
+    if not _ITEM_ID_RE.match(str(item_id or "")):
+        raise ValueError(f"bad backend item id: {item_id!r}")
+    return str(item_id)
 
 
 @runtime_checkable

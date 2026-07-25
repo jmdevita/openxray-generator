@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import requests
 
+from .base import check_item_id
+
 
 class PlexServer:
     key_prefix = "plex"  # manifest namespace (MediaSource seam)
@@ -43,7 +45,7 @@ class PlexServer:
         return out
 
     def metadata(self, rating_key):
-        j = self._get(f"/library/metadata/{rating_key}")
+        j = self._get(f"/library/metadata/{check_item_id(rating_key)}")
         return j["MediaContainer"]["Metadata"][0]
 
     @staticmethod
@@ -95,7 +97,8 @@ class PlexServer:
     def series_leaves(self, series_id):
         """Every episode of one show (MediaSource seam). allLeaves flattens
         the season tree, so this is one request whatever the show's shape."""
-        j = self._get(f"/library/metadata/{series_id}/allLeaves")
+        j = self._get(
+            f"/library/metadata/{check_item_id(series_id)}/allLeaves")
         return [{"ratingKey": str(m.get("ratingKey")),
                  "type": m.get("type"),
                  "title": m.get("title"),

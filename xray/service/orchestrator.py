@@ -759,6 +759,22 @@ _DASH_PAGE = _HEAD + "<title>OpenXray</title>" + _STYLE + r"""
 </main>
 <script>
 const $ = id => document.getElementById(id);
+
+// Actions carrying DATA are wired through data-* attributes and this one
+// delegated listener, never an inline onclick. HTML-escaping is not enough
+// inside a JS string inside an attribute: the parser decodes &#39; back to a
+// quote BEFORE the JS parser runs, so an id containing one would break out
+// and execute. dataset hands the decoded text straight to a variable, where
+// it is data and stays data.
+document.addEventListener('click', ev => {
+ const el = ev.target.closest('[data-act]');
+ if(!el) return;
+ const d = el.dataset;
+ if(d.act === 'queue')  return queueOne(d.rk, +d.level);
+ if(d.act === 'series') return queueSeries(d.sid, +d.level);
+ if(d.act === 'share')  return hubUpload(d.cid);
+ if(d.act === 'log')    return showLog(+d.id);
+});
 const j = r => r.json();
 const post = (u, b) => fetch(u, {method:'POST',
   headers:{'content-type':'application/json'},
@@ -1083,22 +1099,22 @@ async function doSearch(){
 }
 
 function resultRow(x){
- const rk = esc(x.ratingKey);
+ const rk = 'data-rk="' + esc(x.ratingKey) + '"';
  const row = '<div class="spread" style="padding:.25rem 0"><span>' + esc(x.label)
   + (x.year ? ' <span class="meta">(' + esc(x.year) + ')</span>' : '')
   + '</span><span class="row"><span class="mono">' + esc(x.type) + '</span>'
-  + '<button class="ghost sm" onclick="queueOne(\'' + rk + '\',0)">Seed</button>'
-  + '<button class="sm" onclick="queueOne(\'' + rk + '\',1)">Full index</button>'
+  + '<button class="ghost sm" data-act="queue" ' + rk + ' data-level="0">Seed</button>'
+  + '<button class="sm" data-act="queue" ' + rk + ' data-level="1">Full index</button>'
   + '</span></div>';
  // An episode brings its whole show with it: indexing TV one episode at a
  // time is the tedious path this avoids.
  if(!x.seriesId) return row;
- const sid = esc(x.seriesId);
+ const sid = 'data-sid="' + esc(x.seriesId) + '"';
  return row + '<div class="meta" style="padding:0 0 .35rem">'
   + 'All of ' + esc(x.series || 'this show') + ': '
-  + '<button class="link sm" onclick="queueSeries(\'' + sid + '\',0)">seed</button>'
-  + ' · <button class="link sm" onclick="queueSeries(\'' + sid
-  + '\',1)">full index</button></div>';
+  + '<button class="link sm" data-act="series" ' + sid + ' data-level="0">seed</button>'
+  + ' · <button class="link sm" data-act="series" ' + sid
+  + ' data-level="1">full index</button></div>';
 }
 
 async function queueSeries(seriesId, level){
@@ -1129,8 +1145,8 @@ async function poll(){
   $('jobView').innerHTML = last
    ? '<div class="spread"><span class="meta">Last run: ' + esc(last.target || '')
      + ' · ' + esc(last.status) + ' · ' + last.done + '/' + last.total
-     + '</span><button class="link sm" onclick="showLog(' + last.id
-     + ')">show log</button></div>'
+     + '</span><button class="link sm" data-act="log" data-id="' + last.id
+   + '">show log</button></div>'
    : '';
   loadStore();
   return;
@@ -1149,8 +1165,8 @@ async function poll(){
   + esc(job.target || '') + '</h2><span class="mono">' + done + ' / ' + total
   + '</span></div><div class="track"><div class="fill" style="width:' + pct
   + '%"></div></div><div>' + rows + '</div>'
-  + '<div><button class="link sm" onclick="showLog(' + job.id
-  + ')">show full log</button></div></div>';
+  + '<div><button class="link sm" data-act="log" data-id="' + job.id
+  + '">show full log</button></div></div>';
  loadStore();
 }
 
@@ -1193,11 +1209,11 @@ async function loadStore(){
    + chip('music', t.blocks.music) + chip('trivia', t.blocks.trivia)
    + '</div></td><td class="acts">'
    + (!t.blocks.faces && rk
-      ? '<button class="ghost sm" onclick="queueOne(\'' + esc(rk)
-        + '\',1)">Deepen</button> ' : '')
+      ? '<button class="ghost sm" data-act="queue" data-rk="' + esc(rk)
+        + '" data-level="1">Deepen</button> ' : '')
    + '<a class="ghost" href="api/export/' + encodeURIComponent(t.contentId)
-   + '">export</a> <button class="sm" onclick="hubUpload(\''
-   + esc(t.contentId) + '\')">Share</button></td></tr>';
+   + '">export</a> <button class="sm" data-act="share" data-cid="'
+   + esc(t.contentId) + '">Share</button></td></tr>';
  }).join('');
  const auto = SETUP && SETUP.hubAutoshare;
  $('storeView').innerHTML =

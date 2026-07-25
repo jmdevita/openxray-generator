@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import requests
 
+from .base import check_item_id
+
 
 class JellyfinServer:
     key_prefix = "jellyfin"  # manifest namespace (MediaSource seam)
@@ -49,7 +51,7 @@ class JellyfinServer:
         return out
 
     def episode_id(self, series_id: str, season: int, episode: int) -> str | None:
-        data = self._get(f"/Shows/{series_id}/Episodes")
+        data = self._get(f"/Shows/{check_item_id(series_id)}/Episodes")
         for ep in data.get("Items", []):
             if ep.get("ParentIndexNumber") == season and ep.get("IndexNumber") == episode:
                 return ep["Id"]
@@ -59,7 +61,7 @@ class JellyfinServer:
 
     def download_url(self, item_id: str) -> str:
         """Direct-play stream ffmpeg can read frames + audio from."""
-        return (f"{self.origin}/Videos/{item_id}/stream"
+        return (f"{self.origin}/Videos/{check_item_id(item_id)}/stream"
                 f"?static=true&api_key={self.token}")
 
     def _item(self, item_id: str) -> dict:
@@ -119,7 +121,8 @@ class JellyfinServer:
 
     def series_leaves(self, series_id: str) -> list[dict]:
         """Every episode of one show (MediaSource seam)."""
-        data = self._get(f"/Shows/{series_id}/Episodes", Fields="ProviderIds")
+        data = self._get(f"/Shows/{check_item_id(series_id)}/Episodes",
+                         Fields="ProviderIds")
         return [self._normalize(it) for it in data.get("Items", [])]
 
     def content_ids(self, section_key: str) -> dict[str, str | None]:
