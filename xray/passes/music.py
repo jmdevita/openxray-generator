@@ -72,11 +72,21 @@ def run(store_dir: Path, key: str, audd_token: str, *,
             if source is None:
                 raise SystemExit("no harvested audio for this title; need "
                                  "--media or a media backend to stream from")
-            rating_key = doc.get("ratingKey")
-            item = source.resolve(rating_key)
+            # The server item id comes from the MANIFEST, not the doc: the
+            # contract carries no server-local id, so a timeline generated
+            # after the schema cleanup has nothing to read here. Prefer the
+            # newest mapping when a title has more than one.
+            cid = doc.get("contentId") or tl_path.stem
+            ids = st.backend_ids(store_dir, cid, source.key_prefix)
+            if not ids:
+                raise SystemExit(
+                    f"{cid} is not mapped to any {source.key_prefix} item, so "
+                    f"there is no stream to pull audio from. Index this title "
+                    f"on this server first, or pass --media with a local file.")
+            item = source.resolve(ids[-1])
             src = item["downloadUrl"]
             print(f"[audio] streaming from {source.key_prefix} "
-                  f"(ratingKey {rating_key})")
+                  f"({source.key_prefix}:{ids[-1]})")
         audio = extract_audio(src, work, tl_path.stem)
     cues = seg.segment(audio, work, min_music_seconds=min_music, merge_gap=merge_gap)
     print(f"{len(cues)} music cue(s) ({sum(c.duration for c in cues):.0f}s of music)")

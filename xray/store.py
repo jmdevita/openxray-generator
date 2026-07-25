@@ -64,6 +64,23 @@ def map_lookup(store: Path, lookup_key: str, content_id: str) -> None:
     save_manifest(store, m)
 
 
+def backend_ids(store: Path, content_id: str, prefix: str) -> list[str]:
+    """Backend item ids mapped to this timeline, in the order they were added.
+
+    The reverse of map_lookup, and the ONLY way back to a server item: the
+    contract deliberately carries no server-local id, so a content-keyed
+    timeline records that association here and nowhere else.
+
+    A timeline can have several (a re-index after the server reassigned an
+    id, or a legacy synthetic key), so callers get every match and should
+    prefer the last: the newest mapping is likeliest to still resolve."""
+    want = f"{content_id}.json"
+    tag = f"{prefix}:"
+    return [lk.split(":", 1)[1]
+            for lk, fn in load_manifest(store).get("lookup", {}).items()
+            if fn == want and lk.startswith(tag)]
+
+
 # --- validation ------------------------------------------------------------
 
 _SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schema" / "timeline.schema.json"
