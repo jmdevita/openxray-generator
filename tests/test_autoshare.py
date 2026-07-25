@@ -37,8 +37,12 @@ class AutoshareCase(unittest.TestCase):
         self.addCleanup(env.stop)
         self.lines = []
 
-    def run_share(self, res, *, on=True, upload=None):
+    def run_share(self, res, *, on=True, upload=None, token="t0ken"):
+        """Runs the auto-share step. A token is present by default: without one
+        the step declines before it would upload, which is its own test below.
+        """
         env = {"XRAY_HUB_AUTOSHARE": "on"} if on else {}
+        env["XRAY_HUB_UPLOAD_TOKEN"] = token
         with mock.patch.dict(os.environ, env), \
                 mock.patch("xray.share.upload_to_hub",
                            upload or mock.DEFAULT) as up:
@@ -88,6 +92,27 @@ class TestWhatGetsShared(AutoshareCase):
         with mock.patch.dict(os.environ, {"XRAY_HUB_URL": "-"}):
             up = self.run_share(result())
         up.assert_not_called()
+
+
+class TestNoWriteCredential(AutoshareCase):
+    """A public hub gates writes in the browser and issues no token for tools,
+    so POSTing anyway earns a 403 per title. Decline before that, and say what
+    does work — the timeline is on disk and a bundle export can carry it."""
+
+    def test_nothing_is_attempted_without_a_token(self):
+        up = self.run_share(result(), token="")
+        up.assert_not_called()
+
+    def test_the_log_points_at_the_path_that_works(self):
+        self.run_share(result(), token="")
+        joined = " ".join(self.lines)
+        self.assertIn("bundle", joined)
+        self.assertIn("/contribute", joined)
+
+    def test_it_says_this_once_not_per_failure(self):
+        """The old code produced one opaque 403 line per title."""
+        self.run_share(result(), token="")
+        self.assertEqual(len(self.lines), 1, self.lines)
 
 
 class TestFailureIsContained(AutoshareCase):

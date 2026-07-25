@@ -65,6 +65,12 @@ def _origin() -> str:
     return ss.get("plex_origin") or os.environ.get("PLEX_ORIGIN", "")
 
 
+def _upload_token() -> str:
+    """Imported lazily so share.py's `requests` stays off the startup path."""
+    from ..share import upload_token
+    return upload_token()
+
+
 def _client_id() -> str:
     cid = ss.get("client_id")
     if not cid:
@@ -219,7 +225,15 @@ def _autoshare(result: dict, log) -> None:
         return
     if index == "hub" or index.startswith("failed"):
         return
-    from ..share import upload_to_hub
+    from ..share import upload_to_hub, upload_token
+    # Without a write credential a public hub answers 403, and retrying it once
+    # per title would fill the log with the same refusal. Say what to do
+    # instead, once, and leave the timeline on disk for a bundle export.
+    if not upload_token():
+        log("  [share] direct upload needs a hub token this build has no way "
+            "to obtain; export a bundle and upload it at the hub's "
+            "/contribute page instead")
+        return
     try:
         out = upload_to_hub(STORE, cid, hub)
         log(f"  [share] sent to the hub: {out.get('status', 'accepted')}")
@@ -394,6 +408,10 @@ def api_setup():
         "auddConfigured": bool(k.audd_token()),
         "hubUrl": k.hub_url(),
         "hubAutoshare": k.hub_autoshare(),
+        # Whether this machine can POST to a hub at all. A public hub gates
+        # writes in the browser, so without a token the honest offer is a file
+        # to upload rather than a button that 403s.
+        "hubDirectUpload": bool(_upload_token()),
         # The gate the dashboard keys off: until a server and a TMDb key
         # exist, no run can succeed, so it shows setup and nothing else.
         "ready": bool(_origin()) and bool(k.tmdb_key()),
@@ -522,12 +540,64 @@ def api_export(content_id: str):
     return FileResponse(out, media_type="application/json", filename=out.name)
 
 
+class BundleRequest(BaseModel):
+    #: Explicit ids, or "" for everything shareable in the store.
+    contentIds: list[str] = []
+
+
+@app.post("/api/export/bundle")
+def api_export_bundle(req: BundleRequest):
+    """One JSON Lines file for many timelines — the thing you upload to a hub.
+
+    A hub rate limits per request, so sharing a library as individual files
+    stops after ten titles. One bundle is one upload however much it carries.
+    Chunked when it would exceed what a hub accepts; the response says how many
+    files there are and the caller fetches each by name.
+    """
+    from ..share import export_bundle
+    ids = req.contentIds or sorted(
+        p.stem for p in STORE.glob("tmdb-*.json") if p.is_file())
+    if not ids:
+        raise HTTPException(422, "nothing shareable in the store yet")
+    out_dir = STORE / "exports"
+    files = export_bundle(STORE, ids, out_dir)
+    if not files:
+        raise HTTPException(422, "no shareable timelines among those ids")
+    return {"files": [f.name for f in files],
+            "timelines": sum(1 for _ in ids),
+            "bytes": sum(f.stat().st_size for f in files)}
+
+
+@app.get("/api/export/bundle/{name}")
+def api_export_bundle_file(name: str):
+    """Download one bundle produced by the POST above."""
+    if "/" in name or "\\" in name or not name.endswith(".xray.jsonl"):
+        raise HTTPException(400, "bad bundle name")
+    out = STORE / "exports" / name
+    if not out.is_file():
+        raise HTTPException(404, "no such bundle; export it first")
+    return FileResponse(out, media_type="application/x-ndjson", filename=name)
+
+
 @app.post("/api/hub/upload/{content_id}")
 def api_hub_upload(content_id: str):
-    from ..share import upload_to_hub
+    """Direct upload, which only works where this machine holds a hub token.
+
+    A public hub gates writes behind a browser bot check and there is no
+    issuance flow for tooling yet, so without a token this used to POST anyway
+    and surface the hub's 403 as an opaque 500. Say what is actually true and
+    point at the path that works."""
+    from ..share import upload_to_hub, upload_token
     hub = k.hub_url()
     if not hub:
         raise HTTPException(503, "no hub URL configured (Settings)")
+    if not upload_token():
+        raise HTTPException(501, {
+            "reason": "direct upload isn't available",
+            "detail": "This hub accepts writes from a browser, and there is no "
+                      "token for tooling yet. Export a bundle and upload it on "
+                      "the hub's /contribute page.",
+            "hub": f"{hub.rstrip('/')}/contribute"})
     try:
         return upload_to_hub(STORE, content_id, hub)
     except SystemExit as e:
@@ -773,6 +843,7 @@ document.addEventListener('click', ev => {
  if(d.act === 'queue')  return queueOne(d.rk, +d.level);
  if(d.act === 'series') return queueSeries(d.sid, +d.level);
  if(d.act === 'share')  return hubUpload(d.cid);
+ if(d.act === 'bundle') return exportBundle(el);
  if(d.act === 'log')    return showLog(+d.id);
 });
 const j = r => r.json();
@@ -1212,14 +1283,21 @@ async function loadStore(){
       ? '<button class="ghost sm" data-act="queue" data-rk="' + esc(rk)
         + '" data-level="1">Deepen</button> ' : '')
    + '<a class="ghost" href="api/export/' + encodeURIComponent(t.contentId)
-   + '">export</a> <button class="sm" data-act="share" data-cid="'
-   + esc(t.contentId) + '">Share</button></td></tr>';
+   + '">export</a>'
+   // Direct upload only where this machine holds a hub token; otherwise the
+   // button could only ever report the hub's refusal, so it isn't offered.
+   + (SETUP && SETUP.hubDirectUpload
+      ? ' <button class="sm" data-act="share" data-cid="'
+        + esc(t.contentId) + '">Share</button>' : '')
+   + '</td></tr>';
  }).join('');
  const auto = SETUP && SETUP.hubAutoshare;
  $('storeView').innerHTML =
   '<div class="spread"><h2>Store</h2><span class="mono">'
   + plural(s.titles.length, 'timeline') + '</span></div>'
-  + (SETUP && SETUP.hubUrl
+  // Auto-share can only work where direct upload can. Offering the toggle
+  // otherwise promises a thing that ends in the hub's 403, once per title.
+  + (SETUP && SETUP.hubUrl && SETUP.hubDirectUpload
      ? '<label class="row" style="font-size:13px"><input type="checkbox"'
        + (auto ? ' checked' : '') + ' onchange="setAutoshare(this.checked)">'
        + ' Share new timelines automatically'
@@ -1227,6 +1305,13 @@ async function loadStore(){
           ? 'each title is sent for review as it finishes'
           : 'off: use Share per title') + '</span></label>'
      : '')
+  + (SETUP && SETUP.hubUrl && !SETUP.hubDirectUpload && s.titles.length
+     ? '<div class="note"><span>Contributing is two steps: build a bundle '
+       + 'here, then upload it on the hub&rsquo;s contribute page. One bundle '
+       + 'covers your whole store and counts as a single upload.</span>'
+       + '<button class="sm" data-act="bundle">Export bundle</button></div>'
+     : '')
+  + '<div id="bundleOut" class="note" hidden></div>'
   + (s.titles.length
      ? '<div class="scroll"><table><thead><tr><th>Title</th><th>Contains</th>'
        + '<th></th></tr></thead><tbody>' + rows + '</tbody></table></div>'
@@ -1269,6 +1354,32 @@ async function hubUpload(cid){
  const r = await post('api/hub/upload/' + encodeURIComponent(cid));
  $('out').hidden = false;
  $('out').textContent = JSON.stringify(await r.json(), null, 1);
+}
+async function exportBundle(btn){
+ const box = $('bundleOut');
+ btn.disabled = true; btn.textContent = 'Bundling…';
+ box.hidden = false; box.innerHTML = '<span>Writing the bundle…</span>';
+ try {
+  const r = await post('api/export/bundle', {contentIds: []});
+  const d = await r.json();
+  if(!r.ok){
+   box.innerHTML = '<span>' + esc((d.detail && d.detail.reason) || d.detail
+     || 'export failed') + '</span>';
+   return;
+  }
+  // Chunked when a hub would refuse the whole thing; each file uploads
+  // separately, so link every one rather than only the first.
+  const kb = Math.round(d.bytes / 1024);
+  const links = d.files.map(n => '<a class="ghost" href="api/export/bundle/'
+    + encodeURIComponent(n) + '">' + esc(n) + '</a>').join(' ');
+  box.innerHTML = '<span>' + plural(d.timelines, 'timeline') + ' in '
+   + plural(d.files.length, 'file') + ' (' + kb + ' KB). Download, then upload '
+   + 'at <a href="' + esc((SETUP.hubUrl || '').replace(/\/$/, ''))
+   + '/contribute" target="_blank" rel="noopener noreferrer">the hub&rsquo;s '
+   + 'contribute page</a>.</span><span>' + links + '</span>';
+ } finally {
+  btn.disabled = false; btn.textContent = 'Export bundle';
+ }
 }
 async function doImport(){
  const src = $('importSrc').value.trim();

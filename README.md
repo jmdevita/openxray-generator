@@ -45,7 +45,12 @@ Everything after that is in the browser:
    left, before you commit to it.
 
 Timelines land in the `timelines` volume. Point Plezy's *Timelines folder/URL*
-at it, or share them to a hub.
+at it.
+
+To contribute back, use **Export bundle**: one `.xray.jsonl` covering your whole
+store, one timeline per line, licensed person data stripped. Upload it on the
+hub's `/contribute` page. A bundle is a single upload however many titles it
+carries, which is what makes sharing a whole library practical.
 
 ## Two tiers
 

@@ -16,9 +16,23 @@ import requests
 from . import __version__, store as st
 
 SHARE_SUFFIX = ".xray.json"
+#: A bundle is JSON Lines: one share-safe timeline per line, no header, so
+#: every line is independently a valid timeline. It exists because a hub rate
+#: limits per REQUEST — sharing a library one file at a time burns an hour's
+#: allowance on the first ten titles.
+BUNDLE_SUFFIX = ".xray.jsonl"
+#: Kept under the hub's own ceilings (25MB / 500 items) with room to spare,
+#: since a hub reads the whole body into memory. Bigger libraries chunk.
+BUNDLE_MAX_BYTES = 20 * 1024 * 1024
+BUNDLE_MAX_ITEMS = 400
 
 
-def export_timeline(store_dir: Path, key: str, out_dir: Path) -> Path:
+def share_doc(store_dir: Path, key: str, *, warn: bool = True) -> tuple[str, dict]:
+    """One stored timeline as a share-safe document. Returns (content_id, doc).
+
+    The single sole place stripping happens, so a file export and a bundle line
+    can never disagree about what leaves the machine.
+    """
     files = st.resolve_timelines(store_dir, [key])
     doc = json.loads(files[0].read_text())
     content_id = doc.get("contentId") or files[0].stem
@@ -30,18 +44,104 @@ def export_timeline(store_dir: Path, key: str, out_dir: Path) -> Path:
     for c in doc.get("cast") or []:
         c.pop("person", None)
         c.pop("thumb", None)
-    if not doc.get("sourceRuntimeMs"):
+    if warn and not doc.get("sourceRuntimeMs"):
         print("[warn] no sourceRuntimeMs on this timeline; receivers can't "
               "detect cut mismatches (older timeline; re-index to fix)")
     doc["generator"] = {"name": "openxray", "version": __version__}
     doc.setdefault("provenance", {}).pop("people", None)
 
     st.validate(doc)  # a share file must itself be a valid timeline
+    return str(content_id), doc
+
+
+def export_timeline(store_dir: Path, key: str, out_dir: Path) -> Path:
+    content_id, doc = share_doc(store_dir, key)
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"{content_id}{SHARE_SUFFIX}"
     st.atomic_write(out, doc)
     print(f"exported → {out}")
     return out
+
+
+def export_bundle(store_dir: Path, keys, out_dir: Path, *,
+                  name: str = "bundle",
+                  max_bytes: int = BUNDLE_MAX_BYTES,
+                  max_items: int = BUNDLE_MAX_ITEMS) -> list[Path]:
+    """Share-safe JSON Lines bundle(s) for `keys`. Returns the files written.
+
+    Chunks rather than writing one enormous file: a hub caps both body size and
+    item count, and a library can exceed either. Each chunk is a complete,
+    independently uploadable bundle.
+
+    A key that cannot be shared is reported and skipped — one unshareable title
+    should not cost the caller the other nine hundred.
+    """
+    keys = list(keys)  # counted and iterated once; a generator would vanish
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    skipped: list[str] = []
+    lines: list[str] = []
+    size = 0
+
+    def flush() -> None:
+        """Always numbered; a lone chunk is renamed at the end."""
+        nonlocal lines, size
+        if not lines:
+            return
+        out = out_dir / f"{name}-{len(written) + 1}{BUNDLE_SUFFIX}"
+        out.write_text("".join(lines), encoding="utf-8")
+        written.append(out)
+        lines, size = [], 0
+
+    for key in keys:
+        try:
+            _, doc = share_doc(store_dir, key, warn=False)
+        except SystemExit as e:
+            skipped.append(f"{key}: {e}")
+            continue
+        # Compact separators: one line per timeline, and a library's worth of
+        # pretty-printing is real bytes over the wire for no reader's benefit.
+        line = json.dumps(doc, ensure_ascii=False, separators=(",", ":")) + "\n"
+        encoded = len(line.encode("utf-8"))
+        if lines and (size + encoded > max_bytes or len(lines) >= max_items):
+            flush()
+        # A single timeline larger than max_bytes still goes out alone rather
+        # than being silently dropped; the hub will say so if it is too big.
+        lines.append(line)
+        size += encoded
+    flush()
+
+    # Renaming after the fact: a single chunk should not be called "bundle-1".
+    if len(written) == 1:
+        final = out_dir / f"{name}{BUNDLE_SUFFIX}"
+        written[0].replace(final)
+        written = [final]
+    for note in skipped:
+        print(f"[skip] {note}")
+    shared = len(keys) - len(skipped)
+    print(f"bundled {shared} timeline(s) into {len(written)} file(s)"
+          + (f"; {len(skipped)} skipped" if skipped else ""))
+    return written
+
+
+def read_bundle(path: Path) -> list[dict]:
+    """Parse a bundle back into documents, naming the line that broke.
+
+    The hub does its own parsing; this is for local round-tripping and tests.
+    """
+    docs = []
+    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            doc = json.loads(line)
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"{path.name} line {n}: {e}")
+        if not isinstance(doc, dict):
+            raise SystemExit(f"{path.name} line {n}: not a JSON object")
+        docs.append(doc)
+    return docs
 
 
 def import_timeline(store_dir: Path, src: str, *, force: bool = False) -> Path:
@@ -95,13 +195,29 @@ def place_shared_doc(store_dir: Path, doc: dict) -> Path:
     return dest
 
 
+def upload_token() -> str:
+    """The hub write credential, if this machine has one.
+
+    A public hub gates writes behind a bot check in the browser, so the tooling
+    path needs a token that hub issues. There is no issuance flow yet, which is
+    why the dashboard offers a file to upload rather than pretending to send
+    one. An operator seeding their own hub can set this and use the direct
+    path."""
+    import os
+    return os.environ.get("XRAY_HUB_UPLOAD_TOKEN", "").strip()
+
+
 def upload_to_hub(store_dir: Path, key: str, hub_url: str,
                   token: str = "") -> dict:
     """Share-safe export + POST to the hub's /upload (pending review there).
 
     The export step strips licensed person data before anything leaves this
-    machine; the hub strips again server-side (defense in depth)."""
+    machine; the hub strips again server-side (defense in depth).
+
+    Needs a write credential: without one a public hub answers 403, so callers
+    should check `upload_token()` before offering this as an action."""
     import tempfile
+    token = token or upload_token()
     with tempfile.TemporaryDirectory() as tmp:
         out = export_timeline(store_dir, key, Path(tmp))
         headers = {"Content-Type": "application/json"}
@@ -109,6 +225,22 @@ def upload_to_hub(store_dir: Path, key: str, hub_url: str,
             headers["X-Upload-Token"] = token
         r = requests.post(f"{hub_url.rstrip('/')}/upload",
                           data=out.read_bytes(), headers=headers, timeout=60)
+    r.raise_for_status()
+    return r.json()
+
+
+def upload_bundle(path: Path, hub_url: str, token: str = "") -> dict:
+    """POST one bundle file. Answers with the hub's per-item summary.
+
+    A bundle is one request against the hub's rate limit however many timelines
+    it carries, which is the entire reason the format exists. A 200 here does
+    not mean every line was accepted: read `counts`."""
+    token = token or upload_token()
+    headers = {"Content-Type": "application/x-ndjson"}
+    if token:
+        headers["X-Upload-Token"] = token
+    r = requests.post(f"{hub_url.rstrip('/')}/upload",
+                      data=path.read_bytes(), headers=headers, timeout=300)
     r.raise_for_status()
     return r.json()
 
