@@ -16,9 +16,18 @@ from . import store as st
 from .sources.base import MediaSource
 
 
+def _season_of(leaf: dict) -> int | None:
+    """A leaf's season as an int. Backends report it as a number, but a
+    missing or unparseable one must not compare equal to anything."""
+    try:
+        return int(leaf.get("season"))
+    except (TypeError, ValueError):
+        return None
+
+
 def enumerate_targets(source: MediaSource, *, rating_key: str | None = None,
                       search: str | None = None, library: str | None = None,
-                      series: str | None = None,
+                      series: str | None = None, season: int | None = None,
                       max_titles: int = 0) -> list[str]:
     from .passes import index_title
     if library:
@@ -26,6 +35,15 @@ def enumerate_targets(source: MediaSource, *, rating_key: str | None = None,
     elif series:
         # The natural unit for TV: between one episode and a whole library.
         leaves = source.series_leaves(series)
+        if season is not None:
+            # A filter, not another request: series_leaves already carries the
+            # season on every leaf. `is not None` and not truthiness because
+            # season 0 is Specials — a real season a falsy check would drop.
+            leaves = [lf for lf in leaves if _season_of(lf) == season]
+            if not leaves:
+                raise ValueError(
+                    f"season {season} has no episodes in this show, so "
+                    f"nothing would run")
     else:
         leaves = None
     if leaves is not None:

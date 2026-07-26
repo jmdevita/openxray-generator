@@ -146,6 +146,9 @@ class RunRequest(BaseModel):
     search: str | None = None
     library: str | None = None
     series: str | None = None   # every episode of one show
+    #: With `series`, narrows to one season. 0 is Specials, so this is
+    #: None-vs-set rather than falsy — see pipeline.enumerate_targets.
+    season: int | None = None
     max_titles: int = 0
     skip: str = ""
     level: int = 1  # 0 = video-free seed, 1 = full index
@@ -153,9 +156,11 @@ class RunRequest(BaseModel):
 
 def _submit(req: RunRequest) -> dict:
     with _lock:
+        target = (req.search or req.library or req.series or req.rating_key)
+        if req.series and req.season is not None:
+            target = f"{target} S{req.season:02d}"   # a season is not the show
         job = {"id": len(_jobs) + 1,
-               "target": (req.search or req.library or req.series
-                          or req.rating_key),
+               "target": target,
                "request": req.model_dump(), "status": "queued",
                # `total` and `current` let the dashboard draw progress without
                # pulling the whole log every poll.
@@ -185,7 +190,7 @@ def _worker() -> None:
             targets = pipeline.enumerate_targets(
                 source, rating_key=req.rating_key,
                 search=req.search, library=req.library, series=req.series,
-                max_titles=req.max_titles)
+                season=req.season, max_titles=req.max_titles)
             log(f"{len(targets)} target(s)")
             job["total"] = len(targets)
             skip = set(req.skip.split(",")) - {""}
@@ -335,6 +340,9 @@ def api_search(q: str):
         out.append({"ratingKey": r.get("ratingKey"), "type": r.get("type"),
                     "label": label, "year": r.get("year"),
                     "seriesId": r.get("seriesId"),
+                    # Already used to build the label; returned too so the UI
+                    # can offer "this season" beside "the whole show".
+                    "season": r.get("season"),
                     "series": r.get("grandparentTitle")})
     return {"results": out}
 
@@ -848,7 +856,7 @@ document.addEventListener('click', ev => {
  if(!el) return;
  const d = el.dataset;
  if(d.act === 'queue')  return queueOne(d.rk, +d.level);
- if(d.act === 'series') return queueSeries(d.sid, +d.level);
+ if(d.act === 'series') return queueSeries(d.sid, +d.level, d.season);
  if(d.act === 'share')  return hubUpload(d.cid);
  if(d.act === 'bundle') return exportBundle(el);
  if(d.act === 'pass')   return queuePass(d.rk, d.pass, d.label);
@@ -1189,16 +1197,30 @@ function resultRow(x){
  // time is the tedious path this avoids.
  if(!x.seriesId) return row;
  const sid = 'data-sid="' + esc(x.seriesId) + '"';
- return row + '<div class="meta" style="padding:0 0 .35rem">'
-  + 'All of ' + esc(x.series || 'this show') + ': '
+ const show = esc(x.series || 'this show');
+ let bulk = '<div class="meta" style="padding:0 0 .35rem">'
+  + 'All of ' + show + ': '
   + '<button class="link sm" data-act="series" ' + sid + ' data-level="0">seed</button>'
   + ' · <button class="link sm" data-act="series" ' + sid
-  + ' data-level="1">full index</button></div>';
+  + ' data-level="1">full index</button>';
+ // Season 0 is Specials — a real season — so test for a number, not truthiness.
+ if(x.season !== null && x.season !== undefined && x.season !== ''){
+  const sn = Number(x.season);
+  const ssn = ' data-season="' + sn + '"';
+  bulk += '<br>Season ' + sn + ' only: '
+   + '<button class="link sm" data-act="series" ' + sid + ssn + ' data-level="0">seed</button>'
+   + ' · <button class="link sm" data-act="series" ' + sid + ssn
+   + ' data-level="1">full index</button>';
+ }
+ return bulk + '</div>';
 }
 
-async function queueSeries(seriesId, level){
- const r = await post('api/run',
-  {series: seriesId, level, skip: runSkip(level)});
+async function queueSeries(seriesId, level, season){
+ // `season` arrives from a data attribute, so it is a string or undefined.
+ // Season 0 is Specials: only undefined/'' means "the whole show".
+ const body = {series: seriesId, level, skip: runSkip(level)};
+ if(season !== undefined && season !== '') body.season = Number(season);
+ const r = await post('api/run', body);
  if(!r.ok) return alert((await r.json()).detail);
  $('results').innerHTML = ''; $('q').value = '';
  poll();

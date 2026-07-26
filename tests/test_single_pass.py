@@ -127,5 +127,84 @@ class TestTheDashboardOffersFillsHonestly(unittest.TestCase):
         self.assertIn("rating_key: ratingKey, level: 1,", self.js)
 
 
+
+class FakeShow:
+    """A show with Specials (season 0) plus two real seasons."""
+    key_prefix = "plex"
+
+    LEAVES = ([{"ratingKey": f"s0e{i}", "season": 0, "episode": i} for i in (1, 2)]
+              + [{"ratingKey": f"s1e{i}", "season": 1, "episode": i} for i in (1, 2, 3)]
+              + [{"ratingKey": f"s2e{i}", "season": 2, "episode": i} for i in (1,)])
+
+    def series_leaves(self, series_id):
+        return list(self.LEAVES)
+
+    def section_leaves(self, name):
+        return list(self.LEAVES)
+
+
+def targets(**kw):
+    return pipeline.enumerate_targets(FakeShow(), **kw)
+
+
+class TestSeasonFilter(unittest.TestCase):
+    def test_no_season_is_the_whole_show(self):
+        self.assertEqual(len(targets(series="99")), 6)
+
+    def test_a_season_narrows_to_its_episodes(self):
+        self.assertEqual(targets(series="99", season=1),
+                         ["s1e1", "s1e2", "s1e3"])
+
+    def test_specials_are_a_real_season(self):
+        """Season 0 is Specials. A truthiness check would treat asking for it
+        as asking for the whole show — six episodes instead of two."""
+        self.assertEqual(targets(series="99", season=0), ["s0e1", "s0e2"])
+
+    def test_an_empty_season_refuses_rather_than_running_nothing(self):
+        with self.assertRaises(ValueError) as cm:
+            targets(series="99", season=7)
+        self.assertIn("season 7", str(cm.exception))
+
+    def test_season_needs_a_series_to_mean_anything(self):
+        """Passing it with a library must not silently filter the library."""
+        self.assertEqual(len(targets(library="Movies", season=1)), 6)
+
+    def test_a_leaf_with_no_season_never_matches(self):
+        class Odd(FakeShow):
+            def series_leaves(self, series_id):
+                return [{"ratingKey": "x", "season": None, "episode": 1},
+                        {"ratingKey": "y", "season": 1, "episode": 1}]
+        self.assertEqual(
+            pipeline.enumerate_targets(Odd(), series="99", season=1), ["y"])
+
+    def test_max_titles_still_applies_within_a_season(self):
+        self.assertEqual(targets(series="99", season=1, max_titles=2),
+                         ["s1e1", "s1e2"])
+
+
+class TestSeasonReachesTheDashboard(unittest.TestCase):
+    def setUp(self):
+        self.js = O.dashboard()
+
+    def test_the_season_option_is_offered(self):
+        self.assertIn("Season ' + sn + ' only:", self.js)
+
+    def test_specials_are_offerable_in_the_ui_too(self):
+        self.assertIn("x.season !== null && x.season !== undefined", self.js)
+
+    def test_a_season_is_only_sent_when_chosen(self):
+        self.assertIn("if(season !== undefined && season !== '') "
+                      "body.season = Number(season);", self.js)
+
+    def test_the_request_model_carries_it(self):
+        self.assertIn("season", O.RunRequest.model_fields)
+        self.assertIsNone(O.RunRequest().season)
+
+    def test_a_season_job_is_labelled_apart_from_the_show(self):
+        job = O._submit(O.RunRequest(series="99", season=3))
+        self.assertTrue(job["target"].endswith("S03"), job["target"])
+        whole = O._submit(O.RunRequest(series="99"))
+        self.assertEqual(whole["target"], "99")
+
 if __name__ == "__main__":
     unittest.main()
