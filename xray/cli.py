@@ -146,6 +146,35 @@ def cmd_enrich(args) -> int:
     return 0
 
 
+def resolve_series(source, value: str) -> str:
+    """A show's id, from its name or from the id itself.
+
+    The dashboard takes the id off a search result it already rendered. The CLI
+    has no search subcommand, so requiring a raw id would make --series
+    unusable without reading the backend's API by hand. Search returns
+    episodes, each carrying the id of its show, so a name is enough."""
+    shows: dict[str, str] = {}
+    for r in source.search(value):
+        sid = r.get("seriesId")
+        if sid:
+            shows[str(sid)] = r.get("grandparentTitle") or "?"
+    if value in shows:          # already an id
+        return value
+    if not shows:
+        raise SystemExit(
+            f"no show matching {value!r}: search matches episodes and the show "
+            f"is taken from theirs, so a query that finds only movies finds no "
+            f"show here")
+    if len(shows) > 1:
+        listing = "\n".join(f"  {sid}  {name}" for sid, name
+                            in sorted(shows.items(), key=lambda kv: kv[1]))
+        raise SystemExit(f"{value!r} matches more than one show:\n{listing}\n"
+                         f"pass one of these ids as --series instead")
+    sid, name = next(iter(shows.items()))
+    print(f"[run] --series {value!r} → {name} ({sid})")
+    return sid
+
+
 def cmd_run(args) -> int:
     """The pipeline (xray/pipeline.py) driven from the CLI."""
     from . import pipeline
@@ -156,11 +185,28 @@ def cmd_run(args) -> int:
     if not tmdb:
         raise SystemExit("need .tmdbkey at the repo root")
 
-    targets = pipeline.enumerate_targets(
-        source, rating_key=args.rating_key,
-        search=args.search, library=args.library, max_titles=args.max_titles)
+    # Season 0 is Specials, so this is set-vs-None; `not args.season` would
+    # reject asking for the Specials as if no season had been given.
+    if args.season is not None and not args.series:
+        raise SystemExit("--season narrows --series; name a show too")
+    series = resolve_series(source, args.series) if args.series else None
+
+    try:
+        targets = pipeline.enumerate_targets(
+            source, rating_key=args.rating_key, search=args.search,
+            library=args.library, series=series, season=args.season,
+            max_titles=args.max_titles)
+    except ValueError as e:
+        # enumerate_targets raises ValueError because it is a library function
+        # (the service turns it into a job-log line). On a terminal that is a
+        # traceback for what is really a typo, so say it plainly instead.
+        raise SystemExit(str(e))
     if args.library:
         print(f"[run] {len(targets)} title(s) from library {args.library!r}")
+    elif series:
+        where = ("every season" if args.season is None
+                 else f"season {args.season}")
+        print(f"[run] {len(targets)} episode(s), {where}")
     skip = set((args.skip or "").split(",")) - {""}
 
     hub = args.hub if args.hub is not None else k.hub_url()
@@ -201,7 +247,9 @@ def cmd_map_jellyfin(args) -> int:
     return 0
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Split out from main() so the flags can be exercised without running a
+    command — otherwise nothing about this surface is testable."""
     p = argparse.ArgumentParser(prog="xray")
     p.add_argument("--dir", default=str(DEFAULT_DIR), help="timeline store")
     p.add_argument("--backend", choices=["plex", "jellyfin"], default="plex",
@@ -243,6 +291,10 @@ def main() -> int:
     pr.add_argument("--rating-key")
     pr.add_argument("--search")
     pr.add_argument("--library", help="process a whole library section by name")
+    pr.add_argument("--series", help="every episode of one show, by name "
+                                     "(or its id); narrow with --season")
+    pr.add_argument("--season", type=int, default=None,
+                    help="with --series, one season only (0 = Specials)")
     pr.add_argument("--max-titles", type=int, default=0,
                     help="cap titles per run (nightly-batch slicing)")
     pr.add_argument("--skip", help="comma list of passes to skip, e.g. music")
@@ -280,8 +332,11 @@ def main() -> int:
     pj.add_argument("--user-id")
     pj.add_argument("--dry-run", action="store_true")
     pj.set_defaults(func=cmd_map_jellyfin)
+    return p
 
-    args = p.parse_args()
+
+def main() -> int:
+    args = build_parser().parse_args()
     return args.func(args)
 
 

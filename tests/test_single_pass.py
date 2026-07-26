@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 os.environ.setdefault("XRAY_STORE", tempfile.mkdtemp())
 
-from xray import pipeline  # noqa: E402
+from xray import cli, pipeline  # noqa: E402
 from xray.service import orchestrator as O  # noqa: E402
 
 PASSES = ["index", "people", "trivia", "music"]
@@ -205,6 +205,92 @@ class TestSeasonReachesTheDashboard(unittest.TestCase):
         self.assertTrue(job["target"].endswith("S03"), job["target"])
         whole = O._submit(O.RunRequest(series="99"))
         self.assertEqual(whole["target"], "99")
+
+class FakeLibrary:
+    """search() returns EPISODES; a show is only reachable via their seriesId."""
+    def __init__(self, results): self.results = results
+    def search(self, q): return self.results
+
+
+def ep(series_id, show):
+    return {"ratingKey": "1", "type": "episode", "seriesId": series_id,
+            "grandparentTitle": show, "season": 1, "episode": 1}
+
+
+class TestResolveSeriesByName(unittest.TestCase):
+    """The CLI has no search subcommand, so a raw series id would be
+    undiscoverable — --series takes the show's name."""
+
+    def test_a_name_resolves_to_the_show_id(self):
+        src = FakeLibrary([ep("1234", "Billions"), ep("1234", "Billions")])
+        self.assertEqual(cli.resolve_series(src, "billions"), "1234")
+
+    def test_an_id_passes_straight_through(self):
+        src = FakeLibrary([ep("1234", "Billions")])
+        self.assertEqual(cli.resolve_series(src, "1234"), "1234")
+
+    def test_no_match_says_why_rather_than_running_everything(self):
+        with self.assertRaises(SystemExit) as cm:
+            cli.resolve_series(FakeLibrary([]), "nope")
+        self.assertIn("no show matching", str(cm.exception))
+
+    def test_a_movie_only_match_is_not_a_show(self):
+        movies = [{"ratingKey": "288", "type": "movie", "seriesId": None}]
+        with self.assertRaises(SystemExit):
+            cli.resolve_series(FakeLibrary(movies), "goodfellas")
+
+    def test_an_ambiguous_name_lists_the_candidates(self):
+        src = FakeLibrary([ep("1", "The Office (US)"), ep("2", "The Office (UK)")])
+        with self.assertRaises(SystemExit) as cm:
+            cli.resolve_series(src, "the office")
+        msg = str(cm.exception)
+        self.assertIn("more than one show", msg)
+        self.assertIn("The Office (UK)", msg)
+        self.assertIn("The Office (US)", msg)
+
+
+class TestRunArguments(unittest.TestCase):
+    def parse(self, *argv):
+        return cli.build_parser().parse_args(["run", *argv])
+
+    def test_series_and_season_are_accepted(self):
+        a = self.parse("--series", "Billions", "--season", "1")
+        self.assertEqual((a.series, a.season), ("Billions", 1))
+
+    def test_season_defaults_to_none_not_zero(self):
+        """Zero would mean Specials, so the default cannot be falsy-equal."""
+        self.assertIsNone(self.parse("--series", "Billions").season)
+
+    def test_specials_parse_as_a_season(self):
+        self.assertEqual(self.parse("--series", "B", "--season", "0").season, 0)
+
+    def test_a_season_without_a_series_is_refused(self):
+        args = self.parse("--season", "1")
+        with mock.patch.object(cli, "_store"), \
+                mock.patch.object(cli, "_make_source"), \
+                mock.patch.object(cli.k, "tmdb_key", return_value="tk"):
+            with self.assertRaises(SystemExit) as cm:
+                cli.cmd_run(args)
+        self.assertIn("--season narrows --series", str(cm.exception))
+
+    def test_an_empty_season_is_a_message_not_a_traceback(self):
+        """enumerate_targets raises ValueError for the service; on a terminal
+        that is a stack trace for what is really a typo."""
+        class Show:
+            key_prefix = "plex"
+            def search(self, q):
+                return [{"seriesId": "1", "grandparentTitle": "B",
+                         "type": "episode"}]
+            def series_leaves(self, sid):
+                return [{"ratingKey": "a", "season": 1, "episode": 1}]
+        args = self.parse("--series", "B", "--season", "9")
+        with mock.patch.object(cli, "_store"), \
+                mock.patch.object(cli, "_make_source", return_value=Show()), \
+                mock.patch.object(cli.k, "tmdb_key", return_value="tk"):
+            with self.assertRaises(SystemExit) as cm:
+                cli.cmd_run(args)
+        self.assertIn("season 9", str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
