@@ -212,8 +212,13 @@ def run(store_dir: Path, work_dir: Path, *, source: MediaSource,
         raise SystemExit("no faces detected")
 
     progress.emit("matching")
-    labels = clu.cluster_embeddings(embeddings, min_cluster_size=opts.min_cluster_size)
-    centroids = clu.cluster_centroids(embeddings, labels)
+    # NOT `labels`: that name already holds the display {title, year, series}
+    # from the TMDb bundle above, and rebinding it here sent an HDBSCAN array
+    # into schema.timeline(labels=...), which raised on `labels or {}` and
+    # killed every full index at the final write.
+    cluster_labels = clu.cluster_embeddings(
+        embeddings, min_cluster_size=opts.min_cluster_size)
+    centroids = clu.cluster_centroids(embeddings, cluster_labels)
     print(f"[refs]   building references for {len(cast)} cast members …")
     if transport is None:
         refs = refsmod.build_reference_embeddings(cast, embedder)
@@ -221,8 +226,8 @@ def run(store_dir: Path, work_dir: Path, *, source: MediaSource,
         refs = refsmod.build_reference_embeddings_http(
             cast, transport, work_dir / "refs")
     cluster_to_actor = clu.label_clusters(centroids, refs, threshold=opts.threshold)
-    intervals = clu.build_intervals(hits, labels, cluster_to_actor, opts.fps,
-                                    min_run=opts.min_run)
+    intervals = clu.build_intervals(hits, cluster_labels, cluster_to_actor,
+                                    opts.fps, min_run=opts.min_run)
 
     progress.emit("writing")
     doc = schema.timeline(content_id, refsmod.public_cast(cast),

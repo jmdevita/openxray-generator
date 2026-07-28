@@ -170,3 +170,38 @@ class TestASeedNeverOverwritesAnIndex(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestClusterLabelsAreNotDisplayLabels(unittest.TestCase):
+    """Regression: `labels` named two different things inside index_title.run.
+
+    It held the TMDb display dict from the bundle, then got rebound to the
+    HDBSCAN cluster array, and that array was what reached
+    schema.timeline(labels=...). `labels or {}` raises on a multi-element
+    numpy array, so EVERY full index died at the final write, after paying
+    for frame extraction and face embedding. Level 0 was unaffected, which is
+    why the store kept showing seeds and nothing looked broken.
+    """
+
+    def test_timeline_rejects_a_cluster_array_where_the_dict_belongs(self):
+        import numpy as np
+        with self.assertRaises(ValueError):
+            schema.timeline("tmdb-movie-809", [], [], "sface-v1",
+                            labels=np.array([0, 0, 1, -1]))
+
+    def test_run_does_not_rebind_the_display_dict(self):
+        """Guards the fix at the source: the two names must stay distinct."""
+        import inspect
+
+        from xray.passes import index_title
+
+        src = inspect.getsource(index_title.run)
+        self.assertIn("cluster_labels = clu.cluster_embeddings", src)
+        self.assertNotIn("labels = clu.cluster_embeddings", src.replace(
+            "cluster_labels = clu.cluster_embeddings", ""))
+
+    def test_the_display_dict_still_reaches_the_document(self):
+        doc = schema.timeline("tmdb-movie-809", [], [], "sface-v1",
+                              labels={"title": "Shrek 2", "year": 2004})
+        self.assertEqual(doc["title"], "Shrek 2")
+        self.assertEqual(doc["year"], 2004)
