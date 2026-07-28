@@ -371,14 +371,61 @@ def api_run(req: RunRequest):
     return {"id": job["id"], "status": job["status"]}
 
 
+def _series_id_for(result: dict) -> str | None:
+    """The show a search result belongs to, whether it IS one or is in one."""
+    if result.get("type") == "show":
+        return str(result.get("ratingKey"))
+    return str(result["seriesId"]) if result.get("seriesId") else None
+
+
+def _by_selector(src, stem: str, season: int, episode: int | None) -> list[dict]:
+    """Results for "smallville s1e1": find the show by name, pick by number.
+
+    Costs one extra request (series_leaves) and only when a selector was
+    actually typed. An unknown show, or a season/episode that does not exist,
+    returns nothing here and the caller falls back to a plain search rather
+    than showing the user an error for a typo.
+    """
+    from .. import query as qy
+    series_id = next((sid for r in src.search(stem)
+                      if (sid := _series_id_for(r))), None)
+    if not series_id:
+        return []
+    leaves = qy.pick(src.series_leaves(series_id), season, episode)
+    # series_leaves omits the show title on each leaf for some backends, so
+    # carry it over: the label is built from it.
+    show = next((r.get("title") for r in src.search(stem)
+                 if r.get("type") == "show"), None)
+    for lf in leaves:
+        lf.setdefault("type", "episode")
+        lf["seriesId"] = series_id
+        if not lf.get("grandparentTitle"):
+            lf["grandparentTitle"] = show
+    return leaves
+
+
 @app.get("/api/search")
 def api_search(q: str):
     """Library candidates for a query: the UI shows these and queues the
-    user's PICK by ratingKey (no more blind first-match)."""
+    user's PICK by ratingKey (no more blind first-match).
+
+    A trailing episode selector ("smallville s1e1", "smallville 1x01",
+    "smallville s2") is split off first. Plex matches on titles, so the
+    selector would otherwise match nothing: the episodes are called "Pilot"
+    and "Metamorphosis"."""
     if not _origin():
         raise HTTPException(503, "no media server configured; run Setup")
+    from .. import query as qy
+    src = _source()
+    stem, season, episode = qy.split_selector(q)
+    # `is not None`: season 0 is Specials, a real season.
+    results = (_by_selector(src, stem, season, episode)
+               if season is not None else [])
+    # No selector, or one that matched nothing: plain search on what was typed.
+    if not results:
+        results = src.search(q)
     out = []
-    for r in _source().search(q):
+    for r in results:
         typ = r.get("type")
         # Shows are included, not just their episodes. Plex answers a query
         # like "smallville" with the SHOW; its episodes are called "Pilot" and
