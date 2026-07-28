@@ -215,3 +215,23 @@ class TestFavicon(unittest.TestCase):
         import re
         for value in re.findall(r"opacity='([\d.]+)'", O._FAVICON_SVG):
             self.assertGreaterEqual(float(value), 0.4, value)
+
+
+class TestPageTitles(unittest.TestCase):
+    """The hub's tab says "OpenXray Hub". Both are open at once whenever
+    someone is contributing, so the generator has to name itself too."""
+
+    def test_the_generator_names_itself(self):
+        self.assertIn("<title>OpenXray Generator</title>", O.dashboard())
+
+    def test_sign_in_too(self):
+        self.assertIn("<title>OpenXray Generator sign-in</title>", O._LOGIN_PAGE)
+
+    def test_no_page_is_titled_just_openxray(self):
+        """Ambiguous against the hub in a tab strip."""
+        for page in (O.dashboard(), O._LOGIN_PAGE):
+            self.assertNotIn("<title>OpenXray</title>", page)
+
+    def test_the_api_docs_agree(self):
+        """Was a third name for the same app."""
+        self.assertEqual(O.app.title, "OpenXray Generator")

@@ -88,7 +88,7 @@ def _source():
     return open_source(backend, _origin(), k.backend_token(backend),
                        user_id=k.jellyfin_user() or None)
 
-app = FastAPI(title="OpenXray orchestrator", version="0.1.0")
+app = FastAPI(title="OpenXray Generator", version="0.1.0")
 
 _jobs: list[dict] = []          # newest first; [{id,target,status,log,...}]
 _queue: list[dict] = []
@@ -986,7 +986,7 @@ _HEAD = ('<!doctype html><meta charset="utf-8">'
          '<meta name="viewport" content="width=device-width,initial-scale=1">'
          + _FAVICON)
 
-_LOGIN_PAGE = _HEAD + "<title>OpenXray sign-in</title>" + _STYLE + r"""
+_LOGIN_PAGE = _HEAD + "<title>OpenXray Generator sign-in</title>" + _STYLE + r"""
 <header><div class="brand"><span class="mark"><i></i></span> OpenXray</div></header>
 <main>
  <div class="card">
@@ -1011,7 +1011,7 @@ async function login(f){
 }
 </script>"""
 
-_DASH_PAGE = _HEAD + "<title>OpenXray</title>" + _STYLE + r"""
+_DASH_PAGE = _HEAD + "<title>OpenXray Generator</title>" + _STYLE + r"""
 <header>
  <div class="brand"><span class="mark"><i></i></span> OpenXray</div>
  <div class="stat" id="stat"></div>
