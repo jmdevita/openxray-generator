@@ -309,3 +309,67 @@ class TestRunArguments(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSearchSurfacesShows(unittest.TestCase):
+    """Plex answers "smallville" with the SHOW, not its episodes.
+
+    Episodes are called "Pilot" and "Metamorphosis", so a show-name query
+    matches none of them. Filtering the show out made those searches return
+    nothing at all, which reads as "not in the library".
+    """
+
+    class Source:
+        def search(self, q):
+            return [
+                {"ratingKey": "900", "type": "show", "title": "Smallville",
+                 "year": 2001, "grandparentTitle": None, "season": None,
+                 "episode": None, "seriesId": None},
+                {"ratingKey": "901", "type": "episode", "title": "Pilot",
+                 "year": 2001, "grandparentTitle": "Smallville", "season": 1,
+                 "episode": 1, "seriesId": "900"},
+                {"ratingKey": "902", "type": "artist", "title": "Smallville",
+                 "year": None, "grandparentTitle": None, "season": None,
+                 "episode": None, "seriesId": None},
+            ]
+
+    def setUp(self):
+        self._origin, self._source = O._origin, O._source
+        O._origin = lambda: "http://plex.example.com"
+        O._source = lambda: self.Source()
+
+    def tearDown(self):
+        O._origin, O._source = self._origin, self._source
+
+    def test_the_show_comes_back(self):
+        types = [r["type"] for r in O.api_search("smallville")["results"]]
+        self.assertIn("show", types)
+
+    def test_a_show_is_its_own_series_target(self):
+        """series_leaves takes the show's own key, so seriesId is ratingKey."""
+        show = next(r for r in O.api_search("smallville")["results"]
+                    if r["type"] == "show")
+        self.assertEqual(show["seriesId"], "900")
+        self.assertEqual(show["series"], "Smallville")
+        self.assertIsNone(show["season"])
+
+    def test_episodes_still_point_at_their_parent(self):
+        ep = next(r for r in O.api_search("smallville")["results"]
+                  if r["type"] == "episode")
+        self.assertEqual(ep["seriesId"], "900")
+        self.assertEqual(ep["label"], "Smallville S01E01 · Pilot")
+
+    def test_unplayable_kinds_are_still_dropped(self):
+        types = [r["type"] for r in O.api_search("smallville")["results"]]
+        self.assertNotIn("artist", types)
+
+    def test_a_show_row_offers_the_series_not_a_rating_key(self):
+        """A show has no single file behind it, so no per-item buttons."""
+        js = O.dashboard()
+        self.assertIn("if(x.type === 'show'){", js)
+        self.assertIn(">Seed all</button>", js)
+        self.assertIn(">Full index all</button>", js)
+        # The show branch returns before `rk` is ever used in markup.
+        show_branch = js.split("if(x.type === 'show'){", 1)[1].split(" }", 1)[0]
+        self.assertIn("data-act=\"series\"", show_branch)
+        self.assertNotIn("data-act=\"queue\"", show_branch)

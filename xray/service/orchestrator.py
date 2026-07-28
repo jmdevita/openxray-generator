@@ -379,20 +379,29 @@ def api_search(q: str):
         raise HTTPException(503, "no media server configured; run Setup")
     out = []
     for r in _source().search(q):
-        if r.get("type") not in ("movie", "episode"):
+        typ = r.get("type")
+        # Shows are included, not just their episodes. Plex answers a query
+        # like "smallville" with the SHOW; its episodes are called "Pilot" and
+        # "Metamorphosis", so they match nothing. Dropping shows made those
+        # searches come back empty, which read as "not in the library".
+        if typ not in ("movie", "episode", "show"):
             continue
         label = r.get("title") or ""
-        if r.get("type") == "episode" and r.get("grandparentTitle"):
+        if typ == "episode" and r.get("grandparentTitle"):
             label = (f"{r['grandparentTitle']} "
                      f"S{int(r.get('season') or 0):02d}"
                      f"E{int(r.get('episode') or 0):02d} · {label}")
-        out.append({"ratingKey": r.get("ratingKey"), "type": r.get("type"),
+        out.append({"ratingKey": r.get("ratingKey"), "type": typ,
                     "label": label, "year": r.get("year"),
-                    "seriesId": r.get("seriesId"),
+                    # A show IS its own series target (series_leaves takes the
+                    # show's key); an episode points at its parent.
+                    "seriesId": (r.get("ratingKey") if typ == "show"
+                                 else r.get("seriesId")),
                     # Already used to build the label; returned too so the UI
                     # can offer "this season" beside "the whole show".
                     "season": r.get("season"),
-                    "series": r.get("grandparentTitle")})
+                    "series": (r.get("title") if typ == "show"
+                               else r.get("grandparentTitle"))})
     return {"results": out}
 
 
@@ -1317,6 +1326,18 @@ async function doSearch(){
 
 function resultRow(x){
  const rk = 'data-rk="' + esc(x.ratingKey) + '"';
+ // A show is not playable, so it gets series-targeted buttons rather than the
+ // per-item ones: there is no single file behind it to index.
+ if(x.type === 'show'){
+  const sid = 'data-sid="' + esc(x.seriesId) + '"';
+  return '<div class="spread" style="padding:.25rem 0"><span>' + esc(x.label)
+   + (x.year ? ' <span class="meta">(' + esc(x.year) + ')</span>' : '')
+   + '</span><span class="row"><span class="mono">show</span>'
+   + '<button class="ghost sm" data-act="series" ' + sid
+   + ' data-level="0">Seed all</button>'
+   + '<button class="sm" data-act="series" ' + sid
+   + ' data-level="1">Full index all</button></span></div>';
+ }
  const row = '<div class="spread" style="padding:.25rem 0"><span>' + esc(x.label)
   + (x.year ? ' <span class="meta">(' + esc(x.year) + ')</span>' : '')
   + '</span><span class="row"><span class="mono">' + esc(x.type) + '</span>'
