@@ -19,9 +19,25 @@ from __future__ import annotations
 
 MARKER = "[progress]"
 
-#: Ordered so a UI can show "step 2 of 4" without knowing pass internals.
-#: `frames` and `matching` are indeterminate (no total); `faces` counts.
-PHASES = ("frames", "faces", "matching", "writing")
+#: Ordered, with each phase's share of one title's bar. The shares are rough
+#: — extraction is network-bound and face detection CPU-bound, so which
+#: dominates depends on the machine — but they only decide how the bar is
+#: APPORTIONED, never whether it moves. Without them a single high-water mark
+#: cannot express two counting phases in a row: extraction would fill the bar
+#: and the face loop would then have nowhere left to go.
+PHASE_WEIGHTS = (("frames", 0.45), ("faces", 0.45),
+                 ("matching", 0.07), ("writing", 0.03))
+PHASES = tuple(name for name, _ in PHASE_WEIGHTS)
+
+
+def _segment(phase: str) -> tuple[float, float] | None:
+    """(start, width) of `phase` within a title, or None if unknown."""
+    start = 0.0
+    for name, weight in PHASE_WEIGHTS:
+        if name == phase:
+            return start, weight
+        start += weight
+    return None
 
 
 def emit(phase: str, done: int = 0, total: int = 0, **extra) -> None:
@@ -49,6 +65,33 @@ def parse(line: str) -> dict | None:
             continue
         out[key] = int(val) if val.lstrip("-").isdigit() else val
     return out or None
+
+
+#: A within-title bar never quite fills. Only the face loop reports a count;
+#: cast matching and writing follow it with none, so letting the loop reach
+#: 1.0 would park the bar at "finished" while the title was still working.
+WITHIN_TITLE_CAP = 0.95
+
+
+def advance(previous: float, event: dict) -> float:
+    """The within-title position after `event`, never going backwards.
+
+    Each phase owns a slice of the bar, so entering one puts the bar at that
+    slice's start and counting within it fills only that slice. Two effects
+    fall out. A phase with no count (cast matching, writing) still moves the
+    bar forward to where it begins, instead of reporting zero and dragging it
+    back. And a counting phase that follows another counting phase has room
+    left to fill, instead of finding the bar already at its maximum.
+
+    max() with the previous value is a backstop, not the mechanism: markers
+    can arrive out of order after a retry, and a bar that retreats is worse
+    than one that pauses.
+    """
+    seg = _segment(str(event.get("phase") or ""))
+    if seg is None:
+        return previous                 # unknown phase: hold, never guess
+    start, width = seg
+    return max(previous, (start + width * fraction(event)) * WITHIN_TITLE_CAP)
 
 
 def fraction(event: dict) -> float:

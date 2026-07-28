@@ -169,15 +169,29 @@ def run(store_dir: Path, work_dir: Path, *, source: MediaSource,
     audio_out = store_dir / "music_work" / tl_stem / f"{tl_stem}__audio.mp3"
     print(f"[frames] extracting @ {opts.fps} fps from the media stream "
           f"(+ audio harvest) …")
-    # ffmpeg reports no usable count until it finishes, so this phase is a
-    # label with no bar. progress.fraction() returns 0 for a missing total
-    # rather than inventing a position.
+    # Measured against media time, not frames written: ffmpeg reports how far
+    # into the file it has decoded, and the runtime is already known from the
+    # media server, so this needs no extra probe.
     progress.emit("frames")
     t0 = time.time()
+
+    # ffmpeg reports roughly twice a second; over a feature that is hundreds
+    # of markers for a bar with a hundred positions. Emit only when the whole
+    # percentage point changes.
+    last_pct = [-1]
+
+    def frames_progress(done_ms, total_ms):
+        pct = int(100 * done_ms / total_ms) if total_ms else 0
+        if pct != last_pct[0]:
+            last_pct[0] = pct
+            progress.emit("frames", done_ms, total_ms)
+
     frames = extract_frames(item["downloadUrl"], work_dir / "frames",
                             sample_fps=opts.fps, start_s=opts.start_s,
                             duration_s=opts.duration_s,
-                            audio_out=None if audio_out.exists() else audio_out)
+                            audio_out=None if audio_out.exists() else audio_out,
+                            duration_ms=item.get("durationMs"),
+                            on_progress=frames_progress)
     if opts.max_frames:
         frames = frames[: opts.max_frames]
     print(f"[frames] {len(frames)} frames [{time.time() - t0:.0f}s]")

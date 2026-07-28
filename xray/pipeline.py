@@ -16,6 +16,46 @@ from . import progress as pg, store as st
 from .sources.base import MediaSource
 
 
+class Cancelled(Exception):
+    """Raised out of a pass when the caller asks a running job to stop.
+
+    Distinct from a pass failing: `step` re-raises this instead of recording
+    it, because a cancelled title must abandon its remaining passes rather
+    than carry on into people/trivia.
+    """
+
+
+class _LineSink(io.TextIOBase):
+    """stdout that hands over whole lines AS THEY ARE WRITTEN.
+
+    The first cut captured into a StringIO and drained it once the pass
+    returned, which meant a feature-length index delivered every log line and
+    every progress marker in one burst at the end: the dashboard sat on
+    "working…" for the entire run and then jumped to done. Passes print
+    steadily, so the sink dispatches on each newline instead.
+
+    Partial trailing text is held until a newline or `close_tail`, so a line
+    is never split across two callbacks.
+    """
+
+    def __init__(self, emit):
+        self._emit = emit
+        self._buf = ""
+
+    def write(self, s: str) -> int:  # noqa: D102 (TextIOBase)
+        self._buf += s
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            self._emit(line)
+        return len(s)
+
+    def close_tail(self) -> None:
+        """Flush a final line that was printed without a newline."""
+        if self._buf:
+            self._emit(self._buf)
+            self._buf = ""
+
+
 def _season_of(leaf: dict) -> int | None:
     """A leaf's season as an int. Backends report it as a number, but a
     missing or unparseable one must not compare equal to anything."""
@@ -98,27 +138,35 @@ def run_title(store: Path, *, source: MediaSource, tmdb_key: str,
         if name in skip:
             result["steps"][name] = "skipped(flag)"
             return
-        # Pass modules print; capture stdout into the job log.
-        buf = io.StringIO()
+
+        def handle(line):
+            # Progress markers leave the log channel here: a feature-length
+            # face pass emits ~50 of them, and the log is for humans. With no
+            # callback they are dropped rather than printed, so the CLI keeps
+            # the milestone lines it always had and nothing else.
+            event = pg.parse(line)
+            if event is not None:
+                if progress:
+                    # May raise Cancelled; that propagates out through print()
+                    # and aborts the pass mid-frame, which is the only way to
+                    # stop a title that is minutes into its face loop.
+                    progress({"pass": name, **event})
+                return
+            log(f"  [{name}] {line}")
+
+        sink = _LineSink(handle)
         try:
-            with contextlib.redirect_stdout(buf):
+            with contextlib.redirect_stdout(sink):
                 fn()
             result["steps"][name] = "ok"
+        except Cancelled:
+            result["steps"][name] = "cancelled"
+            raise           # abandon the title; do not run its later passes
         except (SystemExit, Exception) as e:  # noqa: BLE001 (batch survives)
             result["steps"][name] = f"failed: {e}"
         finally:
-            for line in buf.getvalue().splitlines():
-                # Progress markers leave the log channel here: a feature-length
-                # face pass emits ~50 of them, and the log is for humans. With
-                # no callback they are dropped rather than printed, so the CLI
-                # keeps the milestone lines it always had and nothing else.
-                event = pg.parse(line)
-                if event is not None:
-                    if progress:
-                        progress({"pass": name, **event})
-                    continue
-                log(f"  [{name}] {line}")
-            if result["steps"][name].startswith("failed"):
+            sink.close_tail()
+            if result["steps"].get(name, "").startswith("failed"):
                 log(f"  [{name}] FAILED: {result['steps'][name]}")
 
     if not cid:

@@ -40,6 +40,7 @@ from pydantic import BaseModel
 from .. import keys as k
 from .. import pipeline, settings_store as ss, store as st
 from ..budget import AuddBudget
+from .. import progress
 from . import media_auth as ma
 
 STORE = Path(os.environ.get("XRAY_STORE",
@@ -168,7 +169,8 @@ def _submit(req: RunRequest) -> dict:
                # title: a feature-length index is minutes of work that would
                # otherwise sit at 0/1 looking indistinguishable from stuck.
                "total": 0, "current": "", "currentTitle": "",
-               "phase": "", "phaseDone": 0, "phaseTotal": 0,
+               "phase": "", "phaseDone": 0, "phaseTotal": 0, "phaseFrac": 0.0,
+               "cancel": False,
                "log": [], "summary": [], "created": _now()}
         _jobs.insert(0, job)
         _queue.append(job)
@@ -208,14 +210,27 @@ def _worker() -> None:
                 job["phase"] = str(ev.get("phase") or "")
                 job["phaseDone"] = int(ev.get("done") or 0)
                 job["phaseTotal"] = int(ev.get("total") or 0)
+                # Monotonic: cast matching and writing report no count, so a
+                # raw reading would send the bar back to zero when the face
+                # loop hands off to them.
+                job["phaseFrac"] = progress.advance(job["phaseFrac"], ev)
+                # Checked here because a marker is the only thing that fires
+                # regularly inside a long pass; anywhere else and a stop would
+                # not land until the pass ended on its own.
+                if job.get("cancel"):
+                    raise pipeline.Cancelled("stopped")
 
             for rk in targets:
+                if job.get("cancel"):
+                    log("stopped before " + rk)
+                    break
                 job["current"] = rk
                 # Cleared per title: a phase left over from the previous one
                 # would show the wrong stage for however long the next title
                 # takes to reach its first marker.
                 job["currentTitle"] = ""
                 job["phase"], job["phaseDone"], job["phaseTotal"] = "", 0, 0
+                job["phaseFrac"] = 0.0
                 result = pipeline.run_title(
                     STORE, source=source,
                     tmdb_key=k.tmdb_key(), audd_token=k.audd_token(),
@@ -226,11 +241,22 @@ def _worker() -> None:
                 job["summary"].append(result)
             job["current"] = job["currentTitle"] = ""
             job["phase"], job["phaseDone"], job["phaseTotal"] = "", 0, 0
-            job["status"] = "done"
+            job["phaseFrac"] = 0.0
+            job["status"] = "stopped" if job.get("cancel") else "done"
+        except pipeline.Cancelled:
+            # A stop is an outcome, not a failure: titles already finished
+            # stay in the summary and on disk, and the partial one is simply
+            # abandoned (its timeline is only written at the end).
+            log("stopped")
+            job["current"] = job["currentTitle"] = ""
+            job["phase"], job["phaseDone"], job["phaseTotal"] = "", 0, 0
+            job["phaseFrac"] = 0.0
+            job["status"] = "stopped"
         except Exception as e:  # noqa: BLE001
             log(f"JOB FAILED: {e}")
             job["current"] = job["currentTitle"] = ""
             job["phase"], job["phaseDone"], job["phaseTotal"] = "", 0, 0
+            job["phaseFrac"] = 0.0
             job["status"] = "failed"
 
 
@@ -404,6 +430,40 @@ def api_plan(library: str):
         raise HTTPException(404, str(e))
 
 
+def _log_peek(j: dict) -> dict:
+    """Enough of the log to draw a collapsed strip, without sending the log.
+
+    The dashboard folds the log away by default and shows the newest line
+    plus a count. Both are O(1) against a list that can hold thousands of
+    entries, which is the whole reason log=0 exists."""
+    lines = j.get("log") or []
+    return {"logLines": len(lines), "lastLine": lines[-1] if lines else ""}
+
+
+@app.post("/api/jobs/{job_id}/stop")
+def api_stop_job(job_id: int):
+    """Ask a running or queued job to stop.
+
+    Cooperative, not a kill: the worker notices between titles, and inside a
+    long pass at the next progress marker. Work already written to disk
+    stays. A job that has already finished is left alone rather than
+    reporting a stop that did nothing."""
+    for j in _jobs:
+        if j["id"] == job_id:
+            if j["status"] in ("done", "failed", "stopped"):
+                return {"status": j["status"], "stopping": False}
+            j["cancel"] = True
+            if j["status"] == "queued":
+                # Never started, so nothing will reach a marker to notice.
+                with _lock:
+                    if j in _queue:
+                        _queue.remove(j)
+                j["status"] = "stopped"
+                return {"status": "stopped", "stopping": False}
+            return {"status": j["status"], "stopping": True}
+    raise HTTPException(404, "no such job")
+
+
 @app.get("/api/jobs")
 def api_jobs(id: int | None = None, log: int = 1):
     if id is not None:
@@ -412,14 +472,15 @@ def api_jobs(id: int | None = None, log: int = 1):
                 # log=0: the dashboard polls a running job for its per-title
                 # rows every few seconds and does not want thousands of log
                 # lines riding along each time.
-                return j if log else {kk: v for kk, v in j.items()
-                                      if kk != "log"}
+                return j if log else {**{kk: v for kk, v in j.items()
+                                         if kk != "log"}, **_log_peek(j)}
         raise HTTPException(404, "no such job")
     # `done`/`total` keep the poll cheap: the dashboard draws a progress bar
     # and the live queue from this, and only fetches a full log on request.
     return [{**{kk: j.get(kk) for kk in ("id", "target", "status", "created",
                                          "total", "current", "currentTitle",
-                                         "phase", "phaseDone", "phaseTotal")},
+                                         "phase", "phaseDone", "phaseTotal",
+                                         "phaseFrac", "cancel")},
              "done": len(j["summary"]),
              "level": (j.get("request") or {}).get("level", 1)}
             for j in _jobs[:50]]
@@ -794,6 +855,21 @@ _STYLE = """<style>
  .q .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
  .q.live .nm{font-weight:600}
  .q .dt{font:11.5px var(--mono);color:var(--faint);white-space:nowrap}
+ /* folded job log */
+ .logbar{display:flex;justify-content:space-between;align-items:center;
+  gap:.7rem;background:var(--soft);border-radius:6px;padding:.4rem .6rem;
+  cursor:pointer;user-select:none}
+ .logbar:hover{background:var(--wash)}
+ .logbar .lg{font:11.5px var(--mono);color:var(--muted);overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+ .logbar .dt{font:11.5px var(--mono);color:var(--faint);white-space:nowrap}
+ .chev{display:inline-block;font-style:normal;transition:transform .15s ease}
+ .chev.down{transform:rotate(90deg)}
+ .logtail{margin:.4rem 0 0;padding:.6rem .7rem;background:var(--soft);
+  border-radius:6px;font:11.5px/1.75 var(--mono);color:var(--muted);
+  white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere}
+ .chip.add.on{background:var(--accent);color:var(--paper);
+  border-color:var(--accent)}
  .pulse{animation:blink 1.4s ease-in-out infinite}
  @keyframes blink{0%,100%{opacity:1}50%{opacity:.35}}
  /* store */
@@ -882,8 +958,13 @@ document.addEventListener('click', ev => {
  if(d.act === 'series') return queueSeries(d.sid, +d.level, d.season);
  if(d.act === 'share')  return hubUpload(d.cid);
  if(d.act === 'bundle') return exportBundle(el);
- if(d.act === 'pass')   return queuePass(d.rk, d.pass, d.label);
+ if(d.act === 'pick')   return togglePick(d.cid, d.pass);
+ if(d.act === 'deepen') return deepenRow(d.rk, d.cid, d.label);
  if(d.act === 'log')    return showLog(+d.id);
+ // Repaint straight away rather than waiting for the next poll: a fold that
+ // takes two seconds to respond reads as a dead control.
+ if(d.act === 'toglog') { logOpen = !logOpen; return poll(); }
+ if(d.act === 'stop')   return stopJob(+d.id);
 });
 const j = r => r.json();
 const post = (u, b) => fetch(u, {method:'POST',
@@ -1168,7 +1249,7 @@ function musicRow(lv){
  // requests are one-time at signup, so say whose limit this is.
  const cap = MUSIC && lv.titlesBeforeCap !== null
   ? '<p class="sub warn">Your spend cap (' + PLAN.auddHeadroom
-    + ' calls left this month) stops music after about '
+    + ' calls left) stops music after about '
     + plural(lv.titlesBeforeCap, 'title') + '. Raise XRAY_AUDD_BUDGET to '
     + 'change it.</p>'
   : '';
@@ -1216,8 +1297,10 @@ function resultRow(x){
   + '<button class="ghost sm" data-act="queue" ' + rk + ' data-level="0">Seed</button>'
   + '<button class="sm" data-act="queue" ' + rk + ' data-level="1">Full index</button>'
   + '</span></div>';
- // An episode brings its whole show with it: indexing TV one episode at a
- // time is the tedious path this avoids.
+ // An episode brings its whole show with it, so the bulk options sit BELOW
+ // the episode's own row instead of replacing it. Doing a whole series is the
+ // common case; doing one episode is still a case, and dropping `row` here
+ // left no way to reach it at all.
  if(!x.seriesId) return row;
  const sid = 'data-sid="' + esc(x.seriesId) + '"';
  const show = esc(x.series || 'this show');
@@ -1235,7 +1318,7 @@ function resultRow(x){
    + ' · <button class="link sm" data-act="series" ' + sid + ssn
    + ' data-level="1">full index</button>';
  }
- return bulk + '</div>';
+ return row + bulk + '</div>';
 }
 
 async function queueSeries(seriesId, level, season){
@@ -1262,16 +1345,39 @@ async function queueOne(ratingKey, level){
 // pass on one title needs no endpoint of its own.
 const PASSES = ['index', 'people', 'trivia', 'music'];
 
-async function queuePass(ratingKey, pass, label){
- // Money is the only thing worth interrupting for; the free passes just run.
- if(pass === 'music' && !confirm(
+// contentId -> the passes ticked on that row. Outside the DOM because the
+// store table is rebuilt on every poll, which would otherwise clear a
+// selection every couple of seconds while the user was still making it.
+const picked = new Map();
+
+function togglePick(cid, pass){
+ const sel = picked.get(cid) || new Set();
+ if(sel.has(pass)) sel.delete(pass); else sel.add(pass);
+ if(sel.size) picked.set(cid, sel); else picked.delete(cid);
+ loadStore();          // repaint now; waiting for the poll feels broken
+}
+
+async function deepenRow(ratingKey, cid, label){
+ const sel = picked.get(cid);
+ // No selection means "fill every gap", which is what Deepen always did.
+ // A selection means exactly those passes: skip is everything else.
+ const skip = sel && sel.size
+   ? PASSES.filter(p => !sel.has(p)).join(',')
+   : runSkip(1);
+ // Money is the only thing worth interrupting for. Confirm whenever music
+ // will actually run — including the no-selection case, which used to bill
+ // silently for anyone with an AudD token configured.
+ const willBillForMusic = sel && sel.size
+   ? sel.has('music')
+   : (SETUP && SETUP.auddConfigured);
+ if(willBillForMusic && !confirm(
       'Identify songs in ' + (label || 'this title') + '?\n\n'
       + 'Billed per music cue, about $0.005 each — roughly $0.10–$0.20 '
       + 'for a feature film. The other passes are free.')) return;
- const r = await post('api/run', {
-   rating_key: ratingKey, level: 1,
-   skip: PASSES.filter(p => p !== pass).join(',')});
+ const r = await post('api/run',
+   {rating_key: ratingKey, level: 1, skip: skip});
  if(!r.ok) return alert((await r.json()).detail);
+ picked.delete(cid);                  // the run owns it now
  $('results').innerHTML = ''; $('q').value = '';
  poll();
 }
@@ -1307,11 +1413,14 @@ async function poll(){
   loadStore();
   return;
  }
- const job = await j(await fetch('api/jobs?log=0&id=' + live.id));
+ // The log rides along only while it is open. Folded away, the strip needs
+ // one line and a count, which log=0 now carries.
+ const job = await j(await fetch('api/jobs?log=' + (logOpen ? 1 : 0)
+   + '&id=' + live.id));
  const total = job.total || 0, done = (job.summary || []).length;
  // Within-title position folded into the overall bar, so one title creeps
  // forward instead of jumping 0→100, and a library run still measures titles.
- const frac = job.phaseTotal > 0 ? Math.min(1, job.phaseDone / job.phaseTotal) : 0;
+ const frac = job.phaseFrac || 0;
  const pct = total ? (100 * Math.min(done + frac, total) / total).toFixed(1) : 0;
  // The rating key is what the user typed; the title is what they meant.
  const live_name = job.currentTitle || job.current;
@@ -1329,11 +1438,38 @@ async function poll(){
   + (job.request && job.request.level ? 'Indexing ' : 'Seeding ')
   + esc(total === 1 ? (live_name || job.target || '') : (job.target || ''))
   + '</h2><span class="mono">' + counter
+  + ' <button class="link sm" data-act="stop" data-id="' + job.id + '">'
+  + (job.cancel ? 'stopping…' : 'stop') + '</button>'
   + '</span></div><div class="track"><div class="fill" style="width:' + pct
   + '%"></div></div><div>' + rows + '</div>'
-  + '<div><button class="link sm" data-act="log" data-id="' + job.id
-  + '">show full log</button></div></div>';
+  + logStrip(job) + '</div>';
  loadStore();
+}
+
+// jobView is rebuilt from scratch on every poll, so "is the log open" has to
+// live outside it or the panel would fold itself back up every few seconds.
+let logOpen = false;
+
+const LOG_TAIL = 14;
+
+function logStrip(job){
+ const n = job.logLines || (job.log || []).length;
+ if(!n) return '';
+ if(!logOpen){
+  // Collapsed: newest line only. That line is the one carrying news, and a
+  // count tells you how much you are not looking at.
+  return '<div class="logbar" data-act="toglog"><span class="lg">'
+   + '<i class="chev">&rsaquo;</i> ' + esc(job.lastLine || '') + '</span>'
+   + '<span class="dt">' + n + ' line' + (n === 1 ? '' : 's') + '</span></div>';
+ }
+ const tail = (job.log || []).slice(-LOG_TAIL);
+ return '<div class="logbar open" data-act="toglog"><span class="lg">'
+  + '<i class="chev down">&rsaquo;</i> log</span>'
+  + '<span class="dt">' + n + ' line' + (n === 1 ? '' : 's') + '</span></div>'
+  + '<pre class="logtail">' + esc(tail.join('\n')) + '</pre>'
+  + (n > LOG_TAIL
+     ? '<div><button class="link sm" data-act="log" data-id="' + job.id
+       + '">show all ' + n + '</button></div>' : '');
 }
 
 function rowFor(s){
@@ -1351,6 +1487,11 @@ function rowFor(s){
   + '</span><span class="dt">' + detail + '</span></div>';
 }
 
+async function stopJob(id){
+ await post('api/jobs/' + id + '/stop', {});
+ poll();   // reflect "stopping…" now; the worker lands it at the next marker
+}
+
 async function showLog(id){
  const jb = await j(await fetch('api/jobs?id=' + id));
  $('out').hidden = false;
@@ -1361,28 +1502,35 @@ async function showLog(id){
 
 async function loadStore(){
  const s = await j(await fetch('api/status'));
- $('stat').textContent = s.backend + ' · ' + (s.origin || 'no server')
-  + ' · AudD ' + s.auddUsed + '/' + (s.auddMonthly || '∞') + ' this month';
+ // No AudD figure here. The 300 is AudD's one-time signup allowance and the
+ // cap is ours, but the counter resets each calendar month, so "0/300 this
+ // month" promised a recurring allowance that does not exist. The planner
+ // still prices a run before it starts, which is where the number helps.
+ $('stat').textContent = s.backend + ' · ' + (s.origin || 'no server');
  const seeds = s.titles.filter(t => !t.blocks.faces).length;
  const rows = s.titles.map(t => {
   const rk = (t.lookup[0] || '').split(':')[1];
-  // A present block is a state; a missing one is an offer. Filling it runs
-  // that pass ALONE (skip = the other three), which is why every block is
-  // offered and not just the paid one — the pipeline already takes `skip`,
-  // this only stops the dashboard hardcoding it to music-or-nothing.
+  // A present block is a state; a missing one is an offer. Clicking an offer
+  // TICKS it rather than running it: picking faces and music separately would
+  // queue two jobs and stream the media twice, where one job harvests the
+  // audio during frame extraction and the music pass reuses that file.
   //
   // Needs a server key: every pass runs through the pipeline against the
   // media server, so a timeline fetched from the hub with no local copy has
   // nothing to run against and stays a plain chip.
+  const sel = picked.get(t.contentId) || new Set();
   const chip = (label, pass, on, paid) => {
    if (on) return '<span class="chip">' + label + '</span>';
    if (!rk) return '<span class="chip off">' + label + '</span>';
-   return '<button class="chip add' + (paid ? ' paid' : '') + '"'
-    + ' data-act="pass" data-rk="' + esc(rk) + '" data-pass="' + pass + '"'
-    + ' data-label="' + esc(storeLabel(t).replace(/<[^>]*>/g, '')) + '"'
+   const ticked = sel.has(pass);
+   return '<button class="chip add' + (paid ? ' paid' : '')
+    + (ticked ? ' on' : '') + '" aria-pressed="' + ticked + '"'
+    + ' data-act="pick" data-cid="' + esc(t.contentId)
+    + '" data-pass="' + pass + '"'
     + ' title="' + (paid
        ? 'Identify songs — billed per cue, about $0.10–0.20 for a feature'
-       : 'Add ' + label + ' to this title — free') + '">+ ' + label + '</button>';
+       : 'Add ' + label + ' to this title — free') + '">'
+    + (ticked ? '✓ ' : '+ ') + label + '</button>';
   };
   return '<tr><td>' + storeLabel(t)
    + '<div class="mono">' + esc(t.contentId) + '</div>'
@@ -1392,9 +1540,15 @@ async function loadStore(){
    + chip('music', 'music', t.blocks.music, true)
    + chip('trivia', 'trivia', t.blocks.trivia)
    + '</div></td><td class="acts">'
-   + (!t.blocks.faces && rk
-      ? '<button class="ghost sm" data-act="queue" data-rk="' + esc(rk)
-        + '" data-level="1">Deepen</button> ' : '')
+   // Offered whenever anything is missing, not just faces: with a selection
+   // it runs exactly what is ticked, and with none it fills every gap.
+   + ((rk && (!t.blocks.faces || !t.blocks.music || !t.blocks.people
+              || !t.blocks.trivia))
+      ? '<button class="ghost sm" data-act="deepen" data-rk="' + esc(rk)
+        + '" data-cid="' + esc(t.contentId) + '" data-label="'
+        + esc(storeLabel(t).replace(/<[^>]*>/g, '')) + '">'
+        + (sel.size ? 'Run ' + sel.size + ' selected' : 'Deepen')
+        + '</button> ' : '')
    + '<a class="ghost" href="api/export/' + encodeURIComponent(t.contentId)
    + '">export</a>'
    // Direct upload only where this machine holds a hub token; otherwise the
@@ -1438,6 +1592,7 @@ async function loadStore(){
   + 'placeholder="import URL (hub or shared file)">'
   + '<button class="ghost" onclick="doImport()">Import</button>'
   + '<button class="ghost" onclick="doValidate()">Validate all</button></div>';
+ paintBundle();   // the markup above just recreated an empty #bundleOut
 }
 
 // Season/episode come from the contentId, not the doc: one source of truth,
@@ -1468,16 +1623,29 @@ async function hubUpload(cid){
  $('out').hidden = false;
  $('out').textContent = JSON.stringify(await r.json(), null, 1);
 }
-async function exportBundle(btn){
+// The Store section is rebuilt every poll, which used to wipe the download
+// links a few seconds after the bundle was written. Keep the rendered result
+// here and let loadStore paint it back.
+let bundleResult = '';
+
+function paintBundle(){
  const box = $('bundleOut');
+ if(!box) return;
+ box.hidden = !bundleResult;
+ box.innerHTML = bundleResult;
+}
+
+async function exportBundle(btn){
  btn.disabled = true; btn.textContent = 'Bundling…';
- box.hidden = false; box.innerHTML = '<span>Writing the bundle…</span>';
+ bundleResult = '<span>Writing the bundle…</span>';
+ paintBundle();
  try {
   const r = await post('api/export/bundle', {contentIds: []});
   const d = await r.json();
   if(!r.ok){
-   box.innerHTML = '<span>' + esc((d.detail && d.detail.reason) || d.detail
+   bundleResult = '<span>' + esc((d.detail && d.detail.reason) || d.detail
      || 'export failed') + '</span>';
+   paintBundle();
    return;
   }
   // Chunked when a hub would refuse the whole thing; each file uploads
@@ -1485,11 +1653,12 @@ async function exportBundle(btn){
   const kb = Math.round(d.bytes / 1024);
   const links = d.files.map(n => '<a class="ghost" href="api/export/bundle/'
     + encodeURIComponent(n) + '">' + esc(n) + '</a>').join(' ');
-  box.innerHTML = '<span>' + plural(d.timelines, 'timeline') + ' in '
+  bundleResult = '<span>' + plural(d.timelines, 'timeline') + ' in '
    + plural(d.files.length, 'file') + ' (' + kb + ' KB). Download, then upload '
    + 'at <a href="' + esc((SETUP.hubUrl || '').replace(/\/$/, ''))
    + '/contribute" target="_blank" rel="noopener noreferrer">the hub&rsquo;s '
    + 'contribute page</a>.</span><span>' + links + '</span>';
+  paintBundle();
  } finally {
   btn.disabled = false; btn.textContent = 'Export bundle';
  }

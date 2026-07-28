@@ -103,8 +103,19 @@ class TestTheDashboardOffersFillsHonestly(unittest.TestCase):
     def setUp(self):
         self.js = O.dashboard()
 
-    def test_a_fill_sends_skip_of_the_other_three(self):
-        self.assertIn("PASSES.filter(p => p !== pass).join(',')", self.js)
+    def test_a_selection_sends_skip_of_everything_unticked(self):
+        """Chips tick rather than run, and Deepen runs the ticked set as ONE
+        job: two jobs would stream the media twice, where one harvests the
+        audio during frame extraction for the music pass to reuse."""
+        self.assertIn("PASSES.filter(p => !sel.has(p)).join(',')", self.js)
+
+    def test_an_empty_selection_still_fills_every_gap(self):
+        self.assertIn(": runSkip(1);", self.js)
+
+    def test_ticking_survives_the_poll_repaint(self):
+        """The store table is rebuilt every couple of seconds, so selection
+        state cannot live in the DOM or it would clear itself mid-click."""
+        self.assertIn("const picked = new Map();", self.js)
 
     def test_every_block_is_offerable_not_just_the_paid_one(self):
         for pass_name in PASSES:
@@ -119,12 +130,16 @@ class TestTheDashboardOffersFillsHonestly(unittest.TestCase):
         so its gaps stay plain chips instead of dead buttons."""
         self.assertIn("if (!rk) return '<span class=\"chip off\">'", self.js)
 
-    def test_only_the_paid_pass_confirms(self):
-        self.assertIn("if(pass === 'music' && !confirm(", self.js)
+    def test_money_confirms_including_the_no_selection_case(self):
+        """Deepen with nothing ticked runs music too when a token is set, and
+        used to bill without asking."""
+        self.assertIn("const willBillForMusic = sel && sel.size", self.js)
+        self.assertIn("? sel.has('music')", self.js)
+        self.assertIn("(SETUP && SETUP.auddConfigured)", self.js)
         self.assertIn("$0.005", self.js)
 
     def test_a_fill_runs_at_level_1(self):
-        self.assertIn("rating_key: ratingKey, level: 1,", self.js)
+        self.assertIn("{rating_key: ratingKey, level: 1, skip: skip}", self.js)
 
 
 
