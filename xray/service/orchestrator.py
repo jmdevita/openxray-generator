@@ -163,8 +163,12 @@ def _submit(req: RunRequest) -> dict:
                "target": target,
                "request": req.model_dump(), "status": "queued",
                # `total` and `current` let the dashboard draw progress without
-               # pulling the whole log every poll.
-               "total": 0, "current": "",
+               # pulling the whole log every poll. `phase`/`phaseDone`/
+               # `phaseTotal` do the same one level down, inside a single
+               # title: a feature-length index is minutes of work that would
+               # otherwise sit at 0/1 looking indistinguishable from stuck.
+               "total": 0, "current": "", "currentTitle": "",
+               "phase": "", "phaseDone": 0, "phaseTotal": 0,
                "log": [], "summary": [], "created": _now()}
         _jobs.insert(0, job)
         _queue.append(job)
@@ -194,21 +198,39 @@ def _worker() -> None:
             log(f"{len(targets)} target(s)")
             job["total"] = len(targets)
             skip = set(req.skip.split(",")) - {""}
+
+            def on_progress(ev, job=job):
+                """Sub-title events from the passes. Last one wins; this is a
+                position, not a stream, so nothing accumulates."""
+                if "title" in ev:
+                    job["currentTitle"] = str(ev["title"])
+                    return
+                job["phase"] = str(ev.get("phase") or "")
+                job["phaseDone"] = int(ev.get("done") or 0)
+                job["phaseTotal"] = int(ev.get("total") or 0)
+
             for rk in targets:
                 job["current"] = rk
+                # Cleared per title: a phase left over from the previous one
+                # would show the wrong stage for however long the next title
+                # takes to reach its first marker.
+                job["currentTitle"] = ""
+                job["phase"], job["phaseDone"], job["phaseTotal"] = "", 0, 0
                 result = pipeline.run_title(
                     STORE, source=source,
                     tmdb_key=k.tmdb_key(), audd_token=k.audd_token(),
                     rating_key=rk, skip=skip, audd_budget=AUDD_BUDGET,
                     hub_url=k.hub_url(), hub_miss="index",  # services never prompt
-                    level=req.level, log=log)
+                    level=req.level, log=log, progress=on_progress)
                 _autoshare(result, log)
                 job["summary"].append(result)
-            job["current"] = ""
+            job["current"] = job["currentTitle"] = ""
+            job["phase"], job["phaseDone"], job["phaseTotal"] = "", 0, 0
             job["status"] = "done"
         except Exception as e:  # noqa: BLE001
             log(f"JOB FAILED: {e}")
-            job["current"] = ""
+            job["current"] = job["currentTitle"] = ""
+            job["phase"], job["phaseDone"], job["phaseTotal"] = "", 0, 0
             job["status"] = "failed"
 
 
@@ -395,8 +417,9 @@ def api_jobs(id: int | None = None, log: int = 1):
         raise HTTPException(404, "no such job")
     # `done`/`total` keep the poll cheap: the dashboard draws a progress bar
     # and the live queue from this, and only fetches a full log on request.
-    return [{**{kk: j[kk] for kk in ("id", "target", "status", "created",
-                                     "total", "current")},
+    return [{**{kk: j.get(kk) for kk in ("id", "target", "status", "created",
+                                         "total", "current", "currentTitle",
+                                         "phase", "phaseDone", "phaseTotal")},
              "done": len(j["summary"]),
              "level": (j.get("request") or {}).get("level", 1)}
             for j in _jobs[:50]]
@@ -1256,6 +1279,19 @@ async function queuePass(ratingKey, pass, label){
 // ---- jobs ------------------------------------------------------------------
 
 const STEP_LABEL = {index:'indexing', people:'cast', trivia:'trivia', music:'music'};
+// Phase names are the pass's vocabulary; these are the viewer's.
+const PHASE_LABEL = {frames:'reading the video', faces:'finding faces',
+                     matching:'matching cast', writing:'writing'};
+
+function phaseText(job){
+ if(!job.phase) return 'working…';
+ const label = PHASE_LABEL[job.phase] || job.phase;
+ // Only the face pass knows its denominator; the rest are honest labels with
+ // no number rather than a bar that invents one.
+ return job.phaseTotal > 0
+  ? label + ' ' + Math.floor(100 * job.phaseDone / job.phaseTotal) + '%'
+  : label + '…';
+}
 
 async function poll(){
  const jobs = await j(await fetch('api/jobs'));
@@ -1273,16 +1309,26 @@ async function poll(){
  }
  const job = await j(await fetch('api/jobs?log=0&id=' + live.id));
  const total = job.total || 0, done = (job.summary || []).length;
- const pct = total ? (100 * done / total).toFixed(1) : 0;
+ // Within-title position folded into the overall bar, so one title creeps
+ // forward instead of jumping 0→100, and a library run still measures titles.
+ const frac = job.phaseTotal > 0 ? Math.min(1, job.phaseDone / job.phaseTotal) : 0;
+ const pct = total ? (100 * Math.min(done + frac, total) / total).toFixed(1) : 0;
+ // The rating key is what the user typed; the title is what they meant.
+ const live_name = job.currentTitle || job.current;
  const rows = (job.summary || []).slice(-6).map(rowFor).join('')
   + (job.current && done < total
      ? '<div class="q live"><span class="ic pulse">●</span>'
-       + '<span class="nm">' + esc(job.current) + '</span>'
-       + '<span class="dt">working…</span></div>' : '');
+       + '<span class="nm">' + esc(live_name) + '</span>'
+       + '<span class="dt">' + esc(phaseText(job)) + '</span></div>' : '');
+ // One title can only ever read 0/1 or 1/1, which looks stuck for the several
+ // minutes a full index takes. Show the phase there and keep the count for
+ // runs where it actually counts something.
+ const counter = total > 1 ? done + ' / ' + total : esc(phaseText(job));
  $('jobView').innerHTML =
   '<div class="sec"><div class="spread"><h2>'
   + (job.request && job.request.level ? 'Indexing ' : 'Seeding ')
-  + esc(job.target || '') + '</h2><span class="mono">' + done + ' / ' + total
+  + esc(total === 1 ? (live_name || job.target || '') : (job.target || ''))
+  + '</h2><span class="mono">' + counter
   + '</span></div><div class="track"><div class="fill" style="width:' + pct
   + '%"></div></div><div>' + rows + '</div>'
   + '<div><button class="link sm" data-act="log" data-id="' + job.id

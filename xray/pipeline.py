@@ -12,7 +12,7 @@ import io
 import json
 from pathlib import Path
 
-from . import store as st
+from . import progress as pg, store as st
 from .sources.base import MediaSource
 
 
@@ -62,7 +62,7 @@ def run_title(store: Path, *, source: MediaSource, tmdb_key: str,
               audd_token: str, rating_key: str, skip: set[str],
               audd_budget: int = 300, hub_url: str = "",
               hub_miss: str = "index", refresh: set[str] = frozenset(),
-              level: int = 1, log=print) -> dict:
+              level: int = 1, log=print, progress=None) -> dict:
     """Index-if-missing + every enrichment pass for one title.
 
     `source` is the media backend (Plex/Jellyfin) via the MediaSource seam;
@@ -73,7 +73,12 @@ def run_title(store: Path, *, source: MediaSource, tmdb_key: str,
 
     `level` picks the depth: 0 seeds a video-free timeline (cast/title, then the
     people+trivia passes: seconds, no streaming, no music); 1 is the full index
-    (faces, music). A level-1 run over a level-0 seed upgrades it in place."""
+    (faces, music). A level-1 run over a level-0 seed upgrades it in place.
+
+    `progress` (optional) receives sub-title events as dicts: `{"title": ...}`
+    once the target resolves, then `{"phase", "done", "total"}` from whichever
+    pass is running. Callers that don't pass one lose nothing: the marker lines
+    are simply dropped instead of cluttering the log."""
     from .passes import index_title
 
     item = source.resolve(rating_key)
@@ -84,6 +89,10 @@ def run_title(store: Path, *, source: MediaSource, tmdb_key: str,
         title += " S%02dE%02d" % (item["season"], item["episode"])
     log(f"=== {title}  ({key}) ===")
     result = {"key": key, "title": title, "steps": {}}
+    if progress:
+        # Emitted before any pass runs so a dashboard can name what it is
+        # working on instead of echoing back the rating key the user gave it.
+        progress({"title": title})
 
     def step(name, fn):
         if name in skip:
@@ -99,6 +108,15 @@ def run_title(store: Path, *, source: MediaSource, tmdb_key: str,
             result["steps"][name] = f"failed: {e}"
         finally:
             for line in buf.getvalue().splitlines():
+                # Progress markers leave the log channel here: a feature-length
+                # face pass emits ~50 of them, and the log is for humans. With
+                # no callback they are dropped rather than printed, so the CLI
+                # keeps the milestone lines it always had and nothing else.
+                event = pg.parse(line)
+                if event is not None:
+                    if progress:
+                        progress({"pass": name, **event})
+                    continue
                 log(f"  [{name}] {line}")
             if result["steps"][name].startswith("failed"):
                 log(f"  [{name}] FAILED: {result['steps'][name]}")

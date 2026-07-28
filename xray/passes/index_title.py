@@ -19,7 +19,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .. import engines, refs as refsmod, schema, store as st
+from .. import engines, progress, refs as refsmod, schema, store as st
 from ..faces import cluster as clu
 from ..frames import extract_frames
 from ..sources.base import MediaSource
@@ -169,6 +169,10 @@ def run(store_dir: Path, work_dir: Path, *, source: MediaSource,
     audio_out = store_dir / "music_work" / tl_stem / f"{tl_stem}__audio.mp3"
     print(f"[frames] extracting @ {opts.fps} fps from the media stream "
           f"(+ audio harvest) …")
+    # ffmpeg reports no usable count until it finishes, so this phase is a
+    # label with no bar. progress.fraction() returns 0 for a missing total
+    # rather than inventing a position.
+    progress.emit("frames")
     t0 = time.time()
     frames = extract_frames(item["downloadUrl"], work_dir / "frames",
                             sample_fps=opts.fps, start_s=opts.start_s,
@@ -180,21 +184,34 @@ def run(store_dir: Path, work_dir: Path, *, source: MediaSource,
 
     if transport is None:
         embeddings, hits = [], []
-        for fr in frames:
+        # The one phase with an exact denominator: `frames` is already a list,
+        # so this is the cheapest honest percentage in the pipeline. Emitting
+        # per frame would put thousands of lines on the channel, so report at
+        # most ~50 times regardless of how long the film is.
+        every = max(1, len(frames) // 50)
+        progress.emit("faces", 0, len(frames))
+        for i, fr in enumerate(frames, 1):
             img = cv2.imread(fr.path)
-            if img is None:
-                continue
-            for det in embedder.detect(img):
-                embeddings.append(embedder.embed(img, det))
-                hits.append(clu.FaceHit(fr.index, fr.timestamp_ms))
+            if img is not None:
+                for det in embedder.detect(img):
+                    embeddings.append(embedder.embed(img, det))
+                    hits.append(clu.FaceHit(fr.index, fr.timestamp_ms))
+            # Counts frames READ, not frames with a face: an unreadable or
+            # empty frame is still work done, and a bar that stalled on a
+            # faceless stretch would be lying.
+            if i % every == 0 or i == len(frames):
+                progress.emit("faces", i, len(frames))
         model_version = embedder.model_version
     else:
+        # One blocking call into the engine service; no counter to read.
+        progress.emit("faces")
         model_version, det_faces = transport.analyze(work_dir / "frames")
         embeddings, hits = faces_to_hits(det_faces, frames)
     print(f"[faces]  {len(embeddings)} faces across {len(frames)} frames")
     if not embeddings:
         raise SystemExit("no faces detected")
 
+    progress.emit("matching")
     labels = clu.cluster_embeddings(embeddings, min_cluster_size=opts.min_cluster_size)
     centroids = clu.cluster_centroids(embeddings, labels)
     print(f"[refs]   building references for {len(cast)} cast members …")
@@ -207,6 +224,7 @@ def run(store_dir: Path, work_dir: Path, *, source: MediaSource,
     intervals = clu.build_intervals(hits, labels, cluster_to_actor, opts.fps,
                                     min_run=opts.min_run)
 
+    progress.emit("writing")
     doc = schema.timeline(content_id, refsmod.public_cast(cast),
                           intervals, model_version,
                           duration_ms=item.get("durationMs"), labels=labels)
