@@ -30,6 +30,7 @@ import os
 import secrets as pysecrets
 import threading
 import time
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -901,8 +902,33 @@ _STYLE = """<style>
   transition:none!important}}
 </style>"""
 
+#: The tab icon: the hub's staggered-bar mark with the bars only part
+#: written, which is what this side of the project does. Kept as readable SVG
+#: and encoded at import rather than pasted in as an opaque blob.
+#:
+#: Inline because the orchestrator image copies only xray/ and schema/, so a
+#: file would need a Dockerfile line and a route to serve it. This also covers
+#: the sign-in page, which shares _HEAD.
+#:
+#: Tracks sit at 48%: below about 40% they vanish at 16px and the mark reads
+#: as two ragged bars instead of three partly-filled ones.
+_FAVICON_SVG = (
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'>"
+    "<rect width='64' height='64' rx='14' fill='#2f5d55'/>"
+    "<rect x='14' y='17' width='20' height='7' rx='3.5' fill='#f7f7f4'/>"
+    "<rect x='22' y='29' width='28' height='7' rx='3.5' fill='#f7f7f4'"
+    " opacity='.48'/>"
+    "<rect x='22' y='29' width='13' height='7' rx='3.5' fill='#f7f7f4'/>"
+    "<rect x='14' y='41' width='14' height='7' rx='3.5' fill='#f7f7f4'"
+    " opacity='.48'/>"
+    "</svg>")
+
+_FAVICON = ('<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,'
+            + urllib.parse.quote(_FAVICON_SVG, safe="") + '">')
+
 _HEAD = ('<!doctype html><meta charset="utf-8">'
-         '<meta name="viewport" content="width=device-width,initial-scale=1">')
+         '<meta name="viewport" content="width=device-width,initial-scale=1">'
+         + _FAVICON)
 
 _LOGIN_PAGE = _HEAD + "<title>OpenXray sign-in</title>" + _STYLE + r"""
 <header><div class="brand"><span class="mark"><i></i></span> OpenXray</div></header>

@@ -182,3 +182,36 @@ class TestDashboardShell(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFavicon(unittest.TestCase):
+    """The tab icon is inlined, so it has no route and no asset to ship."""
+
+    def test_both_pages_carry_it(self):
+        """Sign-in shares _HEAD with the dashboard; an unbranded login tab is
+        the first thing a new user sees."""
+        for page in (O.dashboard(), O._LOGIN_PAGE):
+            self.assertIn('rel="icon"', page)
+            self.assertIn("data:image/svg+xml,", page)
+
+    def test_the_data_uri_decodes_back_to_the_svg(self):
+        import re
+        import urllib.parse
+        href = re.search(r'href="data:image/svg\+xml,([^"]+)"', O._FAVICON)
+        self.assertIsNotNone(href, "favicon href not found")
+        self.assertEqual(urllib.parse.unquote(href.group(1)), O._FAVICON_SVG)
+
+    def test_it_is_the_project_mark_not_a_new_one(self):
+        """Same staggered geometry as the hub's favicon, so the two read as
+        one project; only the fills differ."""
+        for bar in ("x='14' y='17' width='20'",
+                    "x='22' y='29' width='28'",
+                    "x='14' y='41' width='14'"):
+            self.assertIn(bar, O._FAVICON_SVG, bar)
+        self.assertIn("#2f5d55", O._FAVICON_SVG)
+
+    def test_tracks_stay_legible_at_16px(self):
+        """Below ~40% the unfilled tracks disappear in a tab strip."""
+        import re
+        for value in re.findall(r"opacity='([\d.]+)'", O._FAVICON_SVG):
+            self.assertGreaterEqual(float(value), 0.4, value)
