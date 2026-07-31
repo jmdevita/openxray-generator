@@ -38,7 +38,9 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
+from .. import engines
 from .. import keys as k
+from .. import voiceprints as vpmod
 from .. import pipeline, settings_store as ss, store as st
 from ..budget import AuddBudget
 from .. import progress
@@ -329,6 +331,41 @@ def _start_threads():
 
 # --- store / jobs API -------------------------------------------------------
 
+def _speaker_state(doc: dict) -> dict | None:
+    """{found, nameable, named, pct} for a diarized title, None if it has none.
+
+    `named` counts voice-derived intervals rather than trusting a flag: the
+    timeline is the thing that gets shared, so what it actually carries is the
+    truthful answer to "has anyone been named".
+
+    `pct` is the share of DIALOGUE TIME the named speakers cover, and it is
+    the honest progress number: five names out of 24 sounds like 20% done,
+    but a film's dialogue is top-heavy -- on the first real title those five
+    covered 47%. Counting speakers understates; counting minutes doesn't.
+    """
+    cid = doc.get("contentId")
+    if "speakers" not in (doc.get("provenance") or {}) or not cid:
+        return None
+    clusters = vpmod.read_clusters(STORE, cid)
+    if not clusters:
+        return None
+    spk = clusters.get("speakers") or []
+    named = {iv.get("actorId") for iv in (doc.get("actorIntervals") or [])
+             if iv.get("source") == "voice"}
+    named_spk = set()
+    try:
+        named_spk = set(json.loads(_names_path(STORE, cid).read_text()))
+    except (OSError, ValueError):
+        pass                       # no names yet, or unreadable: pct stays 0
+    total = sum(s.get("seconds") or 0 for s in spk)
+    covered = sum(s.get("seconds") or 0 for s in spk
+                  if s.get("speaker") in named_spk)
+    return {"found": len(spk),
+            "nameable": sum(1 for s in spk if s.get("enrollable")),
+            "named": len(named),
+            "pct": round(100 * covered / total) if total else 0}
+
+
 def _inventory() -> list[dict]:
     out = []
     manifest = st.load_manifest(STORE)
@@ -344,7 +381,13 @@ def _inventory() -> list[dict]:
             "year": doc.get("year"),
             "series": doc.get("series"),
             "blocks": {b: (prov.get(b) or {}).get("generated")
-                       for b in ("faces", "people", "music", "trivia")},
+                       for b in ("faces", "people", "music", "trivia",
+                                 "speakers")},
+            # Speakers is the one block whose presence does NOT mean finished:
+            # the pass stores clusters and stops, because naming needs a
+            # person. The row has to be able to say "16 speakers, none named",
+            # which no other block ever needs to express.
+            "speakerState": _speaker_state(doc),
             "lookup": rev.get(f.name, []),
             "intervals": len(doc.get("actorIntervals") or []),
             "songs": len(doc.get("musicIntervals") or []),
@@ -555,6 +598,10 @@ def api_setup():
                      "signedIn": bool(ss.get("jellyfin_token"))},
         "tmdbConfigured": bool(k.tmdb_key()),
         "auddConfigured": bool(k.audd_token()),
+        # Whether the speakers pass can run at all. Offering a pass that would
+        # fail is worse than not offering it: the failure arrives as a dead job
+        # in the log rather than as an answer to the question being asked.
+        "speakers": _speaker_availability(),
         "hubUrl": k.hub_url(),
         "hubAutoshare": k.hub_autoshare(),
         # Whether this machine can POST to a hub at all. A public hub gates
@@ -662,6 +709,9 @@ class SettingsPatch(BaseModel):
     backend: str | None = None
     tmdb_key: str | None = None
     audd_token: str | None = None
+    #: Fetches the gated pyannote weights for the speakers pass. Needed once,
+    #: and not at all if the image was built with them baked in.
+    hf_token: str | None = None
     hub_url: str | None = None
     # "on" or "" (empty deletes the key): settings_store str()-coerces,
     # so a real bool would round-trip False into the truthy "False".
@@ -676,7 +726,288 @@ def api_settings_put(patch: SettingsPatch):
     return ss.redacted()
 
 
+# --- speaker model weights --------------------------------------------------
+#
+# DECLARED BEFORE /api/speakers/{content_id}: FastAPI matches in declaration
+# order, so with the parameterised route first, "models" would be read as a
+# content id and this would 404 on a title that does not exist.
+
+
+def _speaker_engine_state() -> dict:
+    """The engine's own account of whether it can work, or why not."""
+    transport = engines.speaker_transport()
+    if transport is None:
+        return {"reachable": False, "state": "off",
+                "message": ("the speakers container is not configured. Start "
+                            "it with: docker compose --profile speakers up -d")}
+    return transport.model_state()
+
+
+#: Short-lived cache of the answer above, because /api/setup carries it and
+#: /api/setup is called on every screen change. 30s: long enough that clicking
+#: around costs nothing, short enough that starting the container is noticed
+#: without a reload. Invalidated outright when a fetch succeeds, so the pass
+#: becomes offerable the moment it can actually run.
+_SPK_TTL = 30.0
+_spk_cache: tuple[float, dict] = (0.0, {})
+
+
+def _speaker_availability() -> dict:
+    """Whether to OFFER the speakers pass at all, cached.
+
+    Note what this does not gate: naming speakers a previous run already found
+    is pure orchestrator work on stored clusters, so the labelling screen keeps
+    working with the container stopped. Only diarizing needs the engine.
+    """
+    global _spk_cache
+    now = time.time()
+    if _spk_cache[1] and now - _spk_cache[0] < _SPK_TTL:
+        return _spk_cache[1]
+    st = _speaker_engine_state()
+    out = {"available": st.get("state") == "ready", "state": st.get("state")}
+    _spk_cache = (now, out)
+    return out
+
+
+@app.get("/api/speakers/models")
+def api_speaker_models():
+    return {**_speaker_engine_state(), "tokenSet": bool(k.hf_token())}
+
+
+@app.post("/api/speakers/models")
+def api_speaker_models_fetch():
+    """Download the weights now, using whatever token is configured.
+
+    Synchronous, and it can take minutes. The alternative -- kick off a job
+    and poll -- buys nothing here: there is one thing happening, the person who
+    clicked is watching it, and a spinner says as much as a progress bar would.
+    """
+    global _spk_cache
+    transport = engines.speaker_transport()
+    if transport is None:
+        raise HTTPException(409, "the speakers container is not running")
+    try:
+        out = transport.fetch_models()
+        _spk_cache = (0.0, {})     # the pass may have just become offerable
+        return out
+    except Exception as e:                         # noqa: BLE001 (reported)
+        raise HTTPException(
+            502, f"engine-speakers did not complete the download: "
+                 f"{type(e).__name__}") from e
+
+
 # --- share actions ----------------------------------------------------------
+
+# --- labelling -----------------------------------------------------------
+#
+# The only screen in the app where a human supplies data rather than reading
+# it. Diarization produces anonymous speakers; these endpoints let someone
+# attach names, and turn those names into intervals.
+
+
+class NameRequest(BaseModel):
+    speaker: str
+    #: The cast entry being assigned, or None to clear. Chosen from the
+    #: title's OWN TMDb cast, so it is an entity with an id rather than free
+    #: text that something downstream would have to reconcile.
+    actor_id: str | None = None
+    character: str | None = None
+    #: Set when the name came from a suggestion, carrying the match's cosine.
+    #: Absent means a person identified it by ear. That distinction is what
+    #: interval confidence is derived from.
+    sim: float | None = None
+
+
+@app.get("/api/speakers/{content_id}")
+def api_speakers(content_id: str):
+    """Clusters for one title, ranked by dialogue time, with suggestions.
+
+    Ordered longest-first because that is the order worth working in: the
+    principals carry most of the runtime, and the tail is mostly one-liners
+    that will never clear the audio floor.
+    """
+    clusters = vpmod.read_clusters(STORE, content_id)
+    if not clusters:
+        raise HTTPException(404, "no speakers for this title; run the pass")
+    path = st.canonical_path(STORE, content_id)
+    doc = json.loads(path.read_text()) if path.exists() else {}
+    runtime_s = (doc.get("sourceRuntimeMs") or 0) / 1000
+
+    by_actor = {}
+    for iv in doc.get("actorIntervals") or []:
+        if iv.get("source") == "voice":
+            by_actor.setdefault(iv["actorId"], 0)
+            by_actor[iv["actorId"]] += 1
+    named = _named_speakers(STORE, content_id)
+
+    rows = []
+    for s in clusters["speakers"]:
+        spk = s["speaker"]
+        assigned = named.get(spk)
+        row = {"speaker": spk, "seconds": s["seconds"],
+               "enrollable": s["enrollable"], "matchable": s["matchable"],
+               "assigned": assigned, "suggest": None,
+               "spans": _spans(clusters["turns"], spk, runtime_s)}
+        if not assigned and s["matchable"] and s.get("embedding"):
+            row["suggest"] = vpmod.suggest(STORE, s["embedding"],
+                                           exclude_content=content_id)
+        rows.append(row)
+    rows.sort(key=lambda r: -r["seconds"])
+    return {"contentId": content_id,
+            "title": doc.get("title"), "runtime": runtime_s,
+            "speechSeconds": round(sum(r["seconds"] for r in rows), 1),
+            "cast": doc.get("cast") or [], "rows": rows,
+            "enrollMin": vpmod.ENROLL_MIN_S, "matchMin": vpmod.MATCH_MIN_S}
+
+
+def _spans(turns, speaker: str, runtime_s: float, gap_s: float = 2.0):
+    """Merged turns as [start, width] fractions of runtime, for the strip.
+
+    Merged because diarization emits one turn per utterance: a character
+    pausing mid-sentence makes two, and unmerged they render as a stipple
+    nobody can read. Fractions so the client can draw at any width.
+    """
+    mine = sorted((s, e) for s, e, k in turns if k == speaker)
+    merged = []
+    for s, e in mine:
+        if merged and s - merged[-1][1] <= gap_s:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    if not runtime_s:
+        return []
+    return [[round(s / runtime_s, 5), round(max(e - s, 0.4) / runtime_s, 5)]
+            for s, e in merged]
+
+
+def _names_path(store, content_id: str):
+    return Path(store) / "speakers" / f"{content_id}.names.json"
+
+
+def _named_speakers(store, content_id: str) -> dict:
+    p = _names_path(store, content_id)
+    return json.loads(p.read_text()) if p.exists() else {}
+
+
+@app.get("/api/speakers/{content_id}/clip/{speaker}")
+def api_speaker_clip(content_id: str, speaker: str):
+    """One audition file per speaker: several passages stitched together.
+
+    Drawn from WIDELY SEPARATED points in the runtime, not consecutive turns.
+    Consecutive ones sound alike even when a cluster merged two characters;
+    start/middle/end makes the merge audible as the voice changing partway
+    through, which is the only purity check a person can actually perform.
+    """
+    clusters = vpmod.read_clusters(STORE, content_id)
+    if not clusters:
+        raise HTTPException(404, "no speakers for this title")
+    audio = STORE / "speakers_work" / content_id / f"{content_id}.wav"
+    if not audio.exists():
+        raise HTTPException(404, "the extracted audio is gone; re-run the pass")
+
+    segs = sorted((s, e) for s, e, k in clusters["turns"]
+                  if k == speaker and e - s >= 1.0)
+    if not segs:
+        raise HTTPException(404, "that speaker has no usable turns")
+    n = min(3, len(segs))
+    picks = [segs[round(i * (len(segs) - 1) / max(1, n - 1))] for i in range(n)]
+
+    out = STORE / "speakers_work" / content_id / f"clip_{speaker}.wav"
+    if not out.exists():
+        _stitch(audio, picks, out)
+    return FileResponse(out, media_type="audio/wav")
+
+
+def _stitch(audio: Path, picks, out: Path, each_s: float = 3.0,
+            gap_s: float = 0.45) -> None:
+    import wave
+    with wave.open(str(audio), "rb") as w:
+        rate, width, chans = w.getframerate(), w.getsampwidth(), w.getnchannels()
+        parts = []
+        for i, (s, e) in enumerate(picks):
+            if i:
+                parts.append(b"\x00" * int(gap_s * rate) * width * chans)
+            w.setpos(int(s * rate))
+            parts.append(w.readframes(int(min(e - s, each_s) * rate)))
+    with wave.open(str(out), "wb") as o:
+        o.setnchannels(chans)
+        o.setsampwidth(width)
+        o.setframerate(rate)
+        o.writeframes(b"".join(parts))
+
+
+@app.post("/api/speakers/{content_id}/name")
+def api_name_speaker(content_id: str, req: NameRequest):
+    """Assign (or clear) one speaker, then rewrite the title's intervals.
+
+    Rewritten from scratch every time rather than patched: the names file is
+    the source of truth, and regenerating is the only way a CLEARED name
+    actually removes its intervals.
+    """
+    clusters = vpmod.read_clusters(STORE, content_id)
+    if not clusters:
+        raise HTTPException(404, "no speakers for this title")
+    names = _named_speakers(STORE, content_id)
+    if req.actor_id and req.character:
+        names[req.speaker] = {"actorId": req.actor_id,
+                              "character": req.character,
+                              "sim": req.sim}
+        emb = next((s.get("embedding") for s in clusters["speakers"]
+                    if s["speaker"] == req.speaker), None)
+        enrollable = next((s["enrollable"] for s in clusters["speakers"]
+                           if s["speaker"] == req.speaker), False)
+        # Enrol only above the floor. A short reference is not dangerous on
+        # its own, but it is a poor one, and it would be reused everywhere.
+        if enrollable:
+            vpmod.enroll(STORE, req.actor_id, actor_id=req.actor_id,
+                         character=req.character, embedding=emb,
+                         content_id=content_id)
+    else:
+        names.pop(req.speaker, None)
+
+    np_ = _names_path(STORE, content_id)
+    np_.parent.mkdir(parents=True, exist_ok=True)
+    np_.write_text(json.dumps(names, indent=1))
+    written = _rebuild_intervals(content_id, clusters, names)
+    return {"ok": True, "named": len(names), "intervals": written}
+
+
+def _rebuild_intervals(content_id: str, clusters: dict, names: dict) -> int:
+    """Names + turns -> actorIntervals, replacing every voice interval.
+
+    confidence carries the SAME meaning as it does for faces: strength of the
+    match to the claimed identity (faces/cluster.py uses mean cosine to the
+    reference photo). A suggestion accepted keeps its cosine; a name given by
+    ear is 1.0, the top of that scale, because a person listening is stronger
+    evidence than any similarity score.
+    """
+    path = st.canonical_path(STORE, content_id)
+    doc = json.loads(path.read_text())
+    kept = [iv for iv in (doc.get("actorIntervals") or [])
+            if (iv.get("source") or "face") != "voice"]
+
+    fresh = []
+    for spk, rec in names.items():
+        mine = sorted((s, e) for s, e, k in clusters["turns"] if k == spk)
+        merged = []
+        for s, e in mine:
+            if merged and s - merged[-1][1] <= 2.0:
+                merged[-1][1] = max(merged[-1][1], e)
+            else:
+                merged.append([s, e])
+        conf = round(float(rec["sim"]), 3) if rec.get("sim") else 1.0
+        for s, e in merged:
+            fresh.append({"actorId": rec["actorId"],
+                          "startMs": int(s * 1000), "endMs": int(e * 1000),
+                          "confidence": conf, "source": "voice"})
+
+    doc["actorIntervals"] = sorted(kept + fresh,
+                                   key=lambda iv: iv.get("startMs") or 0)
+    doc.setdefault("provenance", {})["speakers"] = {
+        "generated": st.now_iso(), "version": "pyannote-3.1 + human"}
+    st.write_timeline(path, doc)
+    return len(fresh)
+
 
 @app.get("/api/export/{content_id}")
 def api_export(content_id: str):
@@ -791,172 +1122,25 @@ def api_validate():
 # Plain strings concatenated, deliberately not f-strings: the CSS and JS are
 # brace-dense and doubling every one of them is how brace bugs get in.
 
-_STYLE = """<style>
- :root{--paper:#f7f7f4;--raise:#fff;--ink:#16181a;--muted:#6b7370;
-  --faint:#9aa19d;--line:#dcdedb;--soft:#e9eae7;--accent:#2f5d55;
-  --wash:#e4ede9;--ok:#2e6b46;--warn:#8a5a12;--stop:#8f3a2f;
-  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
- @media(prefers-color-scheme:dark){:root{--paper:#131517;--raise:#1a1d1f;
-  --ink:#e8eae8;--muted:#98a09c;--faint:#6b7370;--line:#2b2f31;--soft:#232729;
-  --accent:#63a894;--wash:#1e2b28;--ok:#6aab84;--warn:#c69248;--stop:#cf7d6e}}
- *{box-sizing:border-box}
- /* .sec sets display:flex at the same specificity as the UA's
-    [hidden]{display:none}, so without this the setup gate hides nothing. */
- [hidden]{display:none!important}
- body{margin:0;background:var(--paper);color:var(--ink);
-  font:14px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
-  -webkit-font-smoothing:antialiased}
- main{max-width:62rem;margin:0 auto;padding:1.4rem 1.25rem 5rem;
-  display:flex;flex-direction:column;gap:1.6rem}
- header{max-width:62rem;margin:0 auto;padding:1.1rem 1.25rem .2rem;
-  display:flex;justify-content:space-between;align-items:baseline;
-  gap:1rem;flex-wrap:wrap}
- .brand{display:flex;align-items:center;gap:.55rem;font-weight:640;
-  font-size:15px;letter-spacing:-.01em}
- .mark{width:17px;height:17px;border-radius:4px;background:var(--accent);
-  flex:none;display:grid;place-items:center}
- .mark i{display:block;width:9px;height:1.5px;background:var(--paper);
-  box-shadow:0 -3.5px 0 var(--paper),0 3.5px 0 var(--paper)}
- .stat{font:12px var(--mono);color:var(--faint);font-variant-numeric:tabular-nums}
- h2{font-size:14px;font-weight:640;margin:0;letter-spacing:-.008em}
- p.sub{margin:.15rem 0 0;color:var(--muted);font-size:13px}
- .sec{display:flex;flex-direction:column;gap:.85rem}
- .card{border:1px solid var(--line);border-radius:9px;padding:.9rem 1rem;
-  background:var(--raise)}
- .row{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}
- .spread{display:flex;justify-content:space-between;align-items:center;
-  gap:1rem;flex-wrap:wrap}
- .meta{color:var(--muted);font-size:12.5px}
- .mono{font:11.5px var(--mono);color:var(--faint)}
- .ok{color:var(--ok)}.warn{color:var(--warn)}.miss{color:var(--faint)}
- input,select{padding:.45rem .6rem;border:1px solid var(--line);border-radius:6px;
-  background:var(--raise);color:var(--ink);font:13px var(--mono);min-width:0}
- input:focus-visible,select:focus-visible,button:focus-visible{outline:2px solid
-  var(--accent);outline-offset:1px}
- button{padding:.45rem .8rem;border-radius:6px;background:var(--accent);
-  color:var(--paper);border:1px solid var(--accent);cursor:pointer;
-  font:600 13px ui-sans-serif,system-ui,sans-serif;white-space:nowrap}
- button.ghost{background:transparent;color:var(--ink);border-color:var(--line)}
- button.link{background:none;border:none;color:var(--muted);padding:.4rem .2rem;
-  font-weight:500;text-decoration:underline;text-underline-offset:3px}
- button.sm{padding:.24rem .55rem;font-size:12px}
- button[disabled]{opacity:.45;cursor:not-allowed}
- a.ghost{padding:.24rem .55rem;font-size:12px;border:1px solid var(--line);
-  border-radius:6px;color:var(--ink);text-decoration:none}
- pre{background:var(--soft);padding:.7rem .8rem;border-radius:7px;font-size:12px;
-  overflow:auto;max-height:22rem;margin:0}
- .code{font:700 26px var(--mono);letter-spacing:6px}
- /* setup steps */
- .step{display:flex;gap:.85rem;padding:.9rem 1rem;border:1px solid var(--line);
-  border-radius:9px;align-items:flex-start;background:var(--raise)}
- .step.done{border-color:var(--soft)}
- .step.now{border-color:var(--accent);background:var(--wash)}
- .step.opt{border-style:dashed;border-color:var(--soft);background:transparent}
- .bul{width:20px;height:20px;border-radius:50%;flex:none;display:grid;
-  place-items:center;font:600 11px var(--mono);margin-top:1px}
- .step.done .bul{background:var(--ok);color:var(--paper)}
- .step.now .bul{background:var(--accent);color:var(--paper)}
- .step.opt .bul{background:var(--soft);color:var(--faint)}
- .step .body{flex:1;min-width:0;display:flex;flex-direction:column;gap:.5rem}
- .step p{margin:0;color:var(--muted);font-size:13px;max-width:36rem}
- .tag{font:600 10.5px var(--mono);letter-spacing:.08em;text-transform:uppercase;
-  padding:.28rem .45rem;border-radius:4px;flex:none}
- .tag.g{background:var(--wash);color:var(--accent)}
- .tag.n{background:var(--soft);color:var(--faint)}
- /* tiers */
- .tiers{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));
-  gap:.7rem}
- .tier{border:1px solid var(--line);border-radius:9px;padding:.9rem 1rem;
-  display:flex;flex-direction:column;gap:.5rem;cursor:pointer;text-align:left;
-  background:var(--raise);color:inherit;font:inherit;
-  /* these are buttons, so they inherit button{white-space:nowrap}; without
-     this the description cannot wrap and the page scrolls sideways */
-  white-space:normal;
-  transition:border-color .15s,background .15s}
- .tier:hover{border-color:var(--muted)}
- .tier.on{border-color:var(--accent);background:var(--wash);
-  box-shadow:inset 0 0 0 1px var(--accent)}
- .tier b{font-size:13.5px;font-weight:640}
- .tier p{margin:0;color:var(--muted);font-size:12.5px;flex:1}
- .tier .cost{display:flex;gap:.9rem;font:12px var(--mono);
-  border-top:1px solid var(--soft);padding-top:.5rem;
-  font-variant-numeric:tabular-nums}
- .tier .cost i{font-style:normal;color:var(--faint)}
- .radio{width:14px;height:14px;border-radius:50%;border:1.5px solid var(--line);
-  flex:none;display:grid;place-items:center}
- .tier.on .radio{border-color:var(--accent)}
- .tier.on .radio::after{content:"";width:7px;height:7px;border-radius:50%;
-  background:var(--accent)}
- /* coverage bar */
- .cov{display:flex;height:7px;border-radius:4px;overflow:hidden;
-  background:var(--soft)}
- .cov span{display:block}
- .cov .f{background:var(--accent)}
- .cov .s{background:var(--accent);opacity:.45}
- .cov .h{background:var(--ok);opacity:.6}
- .key{display:flex;gap:.9rem;flex-wrap:wrap;font-size:12.5px;color:var(--muted);
-  font-variant-numeric:tabular-nums}
- .key i{width:8px;height:8px;border-radius:2px;display:inline-block;
-  margin-right:.35rem}
- /* progress + queue */
- .track{height:5px;border-radius:3px;background:var(--soft);overflow:hidden}
- .fill{height:100%;background:var(--accent);border-radius:3px;
-  transition:width .4s ease}
- .q{display:grid;grid-template-columns:1.1rem 1fr auto;gap:.7rem;
-  align-items:center;padding:.4rem 0;border-bottom:1px solid var(--soft);
-  font-size:13px}
- .q:last-child{border-bottom:none}
- .q .ic{font:11px var(--mono);text-align:center}
- .q.done .ic{color:var(--ok)}.q.live .ic{color:var(--accent)}
- .q.bad .ic{color:var(--warn)}.q.bad .dt{color:var(--warn)}
- .q .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
- .q.live .nm{font-weight:600}
- .q .dt{font:11.5px var(--mono);color:var(--faint);white-space:nowrap}
- /* folded job log */
- .logbar{display:flex;justify-content:space-between;align-items:center;
-  gap:.7rem;background:var(--soft);border-radius:6px;padding:.4rem .6rem;
-  cursor:pointer;user-select:none}
- .logbar:hover{background:var(--wash)}
- .logbar .lg{font:11.5px var(--mono);color:var(--muted);overflow:hidden;
-  text-overflow:ellipsis;white-space:nowrap}
- .logbar .dt{font:11.5px var(--mono);color:var(--faint);white-space:nowrap}
- .chev{display:inline-block;font-style:normal;transition:transform .15s ease}
- .chev.down{transform:rotate(90deg)}
- .logtail{margin:.4rem 0 0;padding:.6rem .7rem;background:var(--soft);
-  border-radius:6px;font:11.5px/1.75 var(--mono);color:var(--muted);
-  white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere}
- .chip.add.on{background:var(--accent);color:var(--paper);
-  border-color:var(--accent)}
- .pulse{animation:blink 1.4s ease-in-out infinite}
- @keyframes blink{0%,100%{opacity:1}50%{opacity:.35}}
- /* store */
- .scroll{overflow-x:auto}
- table{border-collapse:collapse;width:100%;font-size:13px}
- th{text-align:left;font:600 10.5px var(--mono);letter-spacing:.1em;
-  text-transform:uppercase;color:var(--faint);padding:0 .6rem .5rem 0;
-  border-bottom:1px solid var(--line)}
- td{padding:.5rem .6rem .5rem 0;border-bottom:1px solid var(--soft);
-  vertical-align:middle}
- tr:last-child td{border-bottom:none}
- td.acts{text-align:right;white-space:nowrap}
- .chips{display:flex;gap:.28rem;flex-wrap:wrap}
- .chip{font:600 10.5px var(--mono);letter-spacing:.04em;padding:.3rem .42rem;
-  border-radius:4px;background:var(--wash);color:var(--accent)}
- .chip.off{background:transparent;color:var(--faint);
-  box-shadow:inset 0 0 0 1px var(--soft)}
- /* A missing block you can fill: dashed to read as an absence, not a state.
-    Only rendered when the title has a server key to run against. */
- button.chip{border:0;cursor:pointer;font-family:var(--mono)}
- button.chip.add{background:transparent;color:var(--accent);
-  box-shadow:inset 0 0 0 1px var(--soft)}
- button.chip.add:hover{background:var(--wash)}
- button.chip.add.paid{color:var(--warn)}
- .note{display:flex;justify-content:space-between;align-items:center;gap:1rem;
-  flex-wrap:wrap;padding:.7rem .9rem;border-radius:8px;background:var(--wash);
-  font-size:13px;color:var(--accent)}
- @media(prefers-reduced-motion:reduce){*{animation:none!important;
-  transition:none!important}}
-</style>"""
+#: The dashboard's CSS/HTML/JS live in service/static/ as REAL FILES, not as
+#: string constants in this module. They were constants until 2026-07-29, and
+#: that cost us twice: a stray quote inside a Python triple-quote silently
+#: broke the entire dashboard script, invisible to every Python tool. As files
+#: they get syntax highlighting, `node --check`, and a diff that means
+#: something.
+#:
+#: Still INLINED into one response rather than served as separate assets: the
+#: page stays a single request with no cache-busting to get wrong, and
+#: `dashboard()` keeps returning the whole document so its tests are unchanged.
+_STATIC = Path(__file__).resolve().parent / "static"
+
+
+def _asset(name: str) -> str:
+    return (_STATIC / name).read_text(encoding="utf-8")
+
+
+_STYLE = "<style>" + _asset("dashboard.css") + "</style>"
+
 
 #: The tab icon: the hub's staggered-bar mark with the bars only part
 #: written, which is what this side of the project does. Kept as readable SVG
@@ -981,6 +1165,7 @@ _FAVICON_SVG = (
 
 _FAVICON = ('<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,'
             + urllib.parse.quote(_FAVICON_SVG, safe="") + '">')
+
 
 _HEAD = ('<!doctype html><meta charset="utf-8">'
          '<meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -1011,771 +1196,10 @@ async function login(f){
 }
 </script>"""
 
-_DASH_PAGE = _HEAD + "<title>OpenXray Generator</title>" + _STYLE + r"""
-<header>
- <div class="brand"><span class="mark"><i></i></span> OpenXray</div>
- <div class="stat" id="stat"></div>
-</header>
-<main>
- <div id="setupView" class="sec" hidden></div>
- <div id="runView" class="sec" hidden></div>
- <div id="jobView" class="sec"></div>
- <div id="storeView" class="sec" hidden></div>
- <pre id="out" hidden></pre>
-</main>
-<script>
-const $ = id => document.getElementById(id);
-
-// Actions carrying DATA are wired through data-* attributes and this one
-// delegated listener, never an inline onclick. HTML-escaping is not enough
-// inside a JS string inside an attribute: the parser decodes &#39; back to a
-// quote BEFORE the JS parser runs, so an id containing one would break out
-// and execute. dataset hands the decoded text straight to a variable, where
-// it is data and stays data.
-document.addEventListener('click', ev => {
- const el = ev.target.closest('[data-act]');
- if(!el) return;
- const d = el.dataset;
- if(d.act === 'queue')  return queueOne(d.rk, +d.level);
- if(d.act === 'series') return queueSeries(d.sid, +d.level, d.season);
- if(d.act === 'share')  return hubUpload(d.cid);
- if(d.act === 'bundle') return exportBundle(el);
- if(d.act === 'pick')   return togglePick(d.cid, d.pass);
- if(d.act === 'deepen') return deepenRow(d.rk, d.cid, d.label);
- if(d.act === 'log')    return showLog(+d.id);
- // Repaint straight away rather than waiting for the next poll: a fold that
- // takes two seconds to respond reads as a dead control.
- if(d.act === 'toglog') { logOpen = !logOpen; return poll(); }
- if(d.act === 'stop')   return stopJob(+d.id);
-});
-const j = r => r.json();
-const post = (u, b) => fetch(u, {method:'POST',
-  headers:{'content-type':'application/json'},
-  body: b ? JSON.stringify(b) : undefined});
-// Library titles are third-party strings; never interpolate them raw.
-const esc = s => String(s ?? '').replace(/[&<>"']/g,
-  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const plural = (n, w) => n + ' ' + w + (n === 1 ? '' : 's');
-
-function hhmm(sec){
- if(sec < 90) return Math.max(1, Math.round(sec)) + 's';
- if(sec < 5400) return Math.round(sec / 60) + 'm';
- return (sec / 3600).toFixed(sec < 36000 ? 1 : 0) + 'h';
-}
-function span(range){
- const [lo, hi] = range;
- return lo === hi ? hhmm(lo) : hhmm(lo) + '–' + hhmm(hi);
-}
-function money(range){
- const [lo, hi] = range;
- if(!hi) return 'free';
- return '$' + lo.toFixed(2) + '–' + hi.toFixed(2);
-}
-
-let SETUP = null, LEVEL = 0, LIB = '', PLAN = null, PLANNING = false;
-// Music is the only paid step. It rides on the full index but is separable:
-// unchecking it sends skip=music, giving a video-only run even with a token.
-let MUSIC = true;
-
-// ---- setup -----------------------------------------------------------------
-
-async function loadSetup(){
- SETUP = await j(await fetch('api/setup'));
- const on = SETUP.ready;
- $('setupView').hidden = on;
- $('runView').hidden = !on;
- $('storeView').hidden = !on;
- if(on){ renderRun(); loadStore(); } else renderSetup();
-}
-
-function renderSetup(){
- const s = SETUP, server = s.backend === 'jellyfin' ? s.jellyfin : s.plex;
- const connected = !!server.origin;
- const steps = [];
-
- steps.push(step(connected ? 'done' : 'now', connected ? '✓' : '1',
-  'Media server', connected ? '' : 'needed',
-  connected
-   ? esc(s.backend) + ' · <span class="mono">' + esc(server.origin) + '</span>'
-   : 'Sign-in happens on plex.tv. This app gets a token you can revoke, not '
-     + 'your password.',
-  connected
-   ? '<button class="link sm" onclick="serverUI(1)">change</button>'
-   : '<div id="serverUI"></div>', !connected));
-
- steps.push(step(s.tmdbConfigured ? 'done' : (connected ? 'now' : 'opt'),
-  s.tmdbConfigured ? '✓' : '2', 'TMDb key',
-  s.tmdbConfigured ? '' : 'needed',
-  'Free from themoviedb.org. Titles are identified by TMDb id, so nothing '
-  + 'runs without one.',
-  s.tmdbConfigured ? '' :
-   '<div class="row"><input id="tmdbKey" style="flex:1" placeholder="paste key">'
-   + '<button onclick="saveKeys()">Save</button></div>'));
-
- steps.push(step('opt', '+', 'AudD token', 'optional',
-  'Names the songs during a full index. Billed per music cue, about $0.005 '
-  + 'each. Without it, music is skipped.',
-  '<div class="row"><input id="auddKey" style="flex:1" placeholder="AudD token'
-  + (s.auddConfigured ? ' (set)' : '') + '">'
-  + '<button class="ghost" onclick="saveKeys()">Save</button></div>'));
-
- // No input here on purpose: the hub is configured, not chosen. Pointing
- // the stack elsewhere is a dev concern and stays on XRAY_HUB_URL.
- steps.push(step(s.hubUrl ? 'done' : 'opt', s.hubUrl ? '✓' : '+',
-  'Hub', s.hubUrl ? '' : 'off',
-  s.hubUrl
-   ? 'Sharing through <span class="mono">' + esc(s.hubUrl) + '</span>. '
-     + 'A full index checks it first and downloads a title when someone has '
-     + 'already done that one, instead of computing it again.'
-   : 'Turned off, so every title is computed locally and nothing is shared.',
-  ''));
-
- $('setupView').innerHTML =
-  '<div><h2>Setup</h2><p class="sub">The first two are required.</p></div>'
-  + steps.join('');
- if(!connected) serverUI(0);
-}
-
-function step(state, bullet, title, tag, body, extra, openNow){
- return '<div class="step ' + state + '"><div class="bul">' + bullet + '</div>'
-  + '<div class="body"><div class="spread"><b>' + title + '</b>'
-  + (tag ? '<span class="tag ' + (state === 'opt' ? 'n' : 'g') + '">' + tag
-           + '</span>' : '')
-  + '</div><p>' + body + '</p>' + (extra || '') + '</div></div>';
-}
-
-function serverUI(force){
- const el = $('serverUI') || $('setupView');
- const box = $('serverUI');
- if(!box){ renderSetup(); return; }
- box.innerHTML =
-  '<div class="row"><button onclick="plexSignIn()">Sign in with Plex</button>'
-  + '<span class="meta">or Jellyfin:</span>'
-  + '<input id="jfOrigin" placeholder="http://jellyfin:8096" style="flex:1">'
-  + '<button class="ghost" onclick="jfQuick()">Quick Connect</button></div>'
-  + '<div class="row"><input id="jfUser" placeholder="user">'
-  + '<input id="jfPass" type="password" placeholder="password">'
-  + '<button class="ghost" onclick="jfPassword()">password sign-in</button></div>'
-  + '<div id="flow"></div>';
-}
-
-async function plexSignIn(){
- const pin = await j(await post('api/auth/plex/pin'));
- window.open(pin.authUrl, '_blank');
- $('flow').innerHTML = '<div class="card meta">Finish signing in on the Plex '
-  + 'tab… <span class="mono">' + esc(pin.code.slice(0, 4)) + '…</span></div>';
- for(let i = 0; i < 120; i++){
-  await new Promise(r => setTimeout(r, 3000));
-  if((await j(await fetch('api/auth/plex/pin/' + pin.id))).claimed) return pickServer();
- }
-}
-
-async function pickServer(){
- const data = await j(await fetch('api/auth/plex/servers'));
- const opts = [];
- for(const srv of data.servers)
-  for(const c of srv.connections)
-   opts.push('<option value="' + esc(c.uri) + '">' + esc(srv.name) + ' · '
-    + esc(c.uri) + (c.local ? ' (local)' : '') + (c.relay ? ' (relay)' : '')
-    + '</option>');
- $('flow').innerHTML = '<div class="card row"><select id="srvPick" style="flex:1">'
-  + opts.join('') + '</select><button onclick="saveServer()">Use this server</button></div>';
-}
-
-async function saveServer(){
- const r = await j(await post('api/auth/plex/origin', {uri: $('srvPick').value}));
- $('flow').innerHTML = r.reachable ? '' : '<div class="card warn">Saved, but this '
-  + 'address is not reachable from the container: pick a different connection '
-  + '(a LAN address can be dead from here while the remote one works).</div>';
- loadSetup();
-}
-
-async function jfQuick(){
- const origin = $('jfOrigin').value.trim();
- if(!origin) return;
- const r = await j(await post('api/auth/jellyfin/quickconnect', {origin}));
- if(!r.enabled){ $('flow').innerHTML = '<div class="card warn">Quick Connect is '
-  + 'disabled on this server; use password sign-in.</div>'; return; }
- $('flow').innerHTML = '<div class="card">Enter this code in Jellyfin '
-  + '(Settings → Quick Connect):<div class="code">' + esc(r.code) + '</div></div>';
- for(let i = 0; i < 120; i++){
-  await new Promise(res => setTimeout(res, 3000));
-  if((await j(await fetch('api/auth/jellyfin/quickconnect/' + r.secret))).claimed){
-   $('flow').innerHTML = ''; return loadSetup();
-  }
- }
-}
-
-async function jfPassword(){
- const r = await post('api/auth/jellyfin/password', {
-  origin: $('jfOrigin').value.trim(), username: $('jfUser').value,
-  password: $('jfPass').value});
- if(r.ok) loadSetup();
- else $('flow').innerHTML = '<div class="card warn">'
-  + esc((await r.json()).detail || 'sign-in failed') + '</div>';
-}
-
-async function saveKeys(){
- const body = {};
- for(const [id, field] of [['tmdbKey','tmdb_key'], ['auddKey','audd_token']]){
-  const el = $(id);
-  if(el && el.value.trim()) body[field] = el.value.trim();
- }
- if(!Object.keys(body).length) return;
- await fetch('api/settings', {method:'PUT',
-  headers:{'content-type':'application/json'}, body: JSON.stringify(body)});
- loadSetup();
-}
-
-// ---- run composer ----------------------------------------------------------
-
-async function renderRun(){
- const libs = await j(await fetch('api/libraries')).catch(() => ({sections:[]}));
- const opts = (libs.sections || []).map(s =>
-  '<option value="' + esc(s.title) + '"' + (s.title === LIB ? ' selected' : '')
-  + '>' + esc(s.title) + '</option>').join('');
- $('runView').innerHTML =
-  '<div class="row"><input id="q" style="flex:1" placeholder="Search a title…"'
-  + ' onkeydown="if(event.key===\'Enter\')doSearch()">'
-  + '<button class="ghost" onclick="doSearch()">Search</button></div>'
-  + '<div id="results"></div>'
-  + '<div class="card sec"><div class="row"><b>Whole library</b>'
-  + '<select id="lib" onchange="pickLib()" style="flex:1">'
-  + '<option value="">choose…</option>' + opts + '</select></div>'
-  + '<div id="plan"></div></div>';
- if(LIB) pickLib();
-}
-
-async function pickLib(){
- LIB = $('lib').value;
- PLAN = null;
- if(!LIB){ $('plan').innerHTML = ''; return; }
- $('plan').innerHTML = '<p class="sub">Checking what you already have…</p>';
- PLANNING = true;
- const r = await fetch('api/plan?library=' + encodeURIComponent(LIB));
- PLANNING = false;
- if(!r.ok){
-  $('plan').innerHTML = '<p class="sub warn">'
-   + esc((await r.json()).detail) + '</p>';
-  return;
- }
- PLAN = await r.json();
- renderPlan();
-}
-
-function renderPlan(){
- const p = PLAN, n = p.distinct || 1;
- const pct = x => (100 * x / n).toFixed(2) + '%';
- const lv = p.levels[String(LEVEL)];
- const hubBit = p.hubChecked
-  ? (p.levels['1'].fromHub
-     ? plural(p.levels['1'].fromHub, 'title') + ' already on the hub'
-     : 'no hub coverage for these')
-  : (SETUP.hubUrl ? 'hub unreachable' : 'no hub configured');
-
- $('plan').innerHTML =
-  '<div class="spread"><h2>' + esc(p.library) + '</h2>'
-  + '<span class="mono">' + plural(p.total, 'title') + '</span></div>'
-  + '<div class="cov" style="margin:.6rem 0 .5rem">'
-  + '<span class="f" style="width:' + pct(p.haveFull) + '"></span>'
-  + '<span class="s" style="width:' + pct(p.haveSeed) + '"></span>'
-  + '<span class="h" style="width:' + pct(p.levels['1'].fromHub) + '"></span>'
-  + '</div>'
-  + '<div class="key">'
-  + keyItem('var(--accent)', p.haveFull, 'fully indexed')
-  + keyItem('var(--accent);opacity:.45', p.haveSeed, 'seeded')
-  + keyItem('var(--ok);opacity:.6', p.levels['1'].fromHub, 'on the hub')
-  + keyItem('var(--soft)', p.levels['1'].todo, 'not indexed')
-  + '</div>'
-  + (p.unidentified ? '<p class="sub">' + plural(p.unidentified, 'title')
-     + ' have no TMDb match and will be skipped.</p>' : '')
-  + '<div class="tiers" style="margin-top:.9rem">'
-  + tier(0, 'Quick seed', 'Cast, biographies and trivia. Does not read the '
-      + 'video file.', p.levels['0'])
-  + tier(1, 'Full index', 'Adds per-actor on-screen intervals'
-      + (SETUP.auddConfigured ? ' and song names' : '')
-      + '. Reads each video file.', p.levels['1'])
-  + '</div>'
-  + musicRow(p.levels['1'])
-  + '<div class="spread" style="margin-top:.9rem">'
-  + '<span class="meta">' + esc(hubBit)
-  + (LEVEL === 0 ? '. Seeds can be deepened later without redoing this work.'
-     : '') + '</span>'
-  + '<button onclick="queueLibrary()"' + (lv.todo ? '' : ' disabled') + '>'
-  + (lv.todo ? (LEVEL ? 'Index ' : 'Seed ') + plural(lv.todo, 'title')
-             : 'Nothing to do') + '</button></div>'
-  // Phrased without a subject-verb agreement to get right for any count.
-  + (LEVEL === 1 && p.levels['1'].hubCouldServe
-     ? '<p class="sub">The hub has full timelines for '
-       + plural(p.levels['1'].hubCouldServe, 'seeded title')
-       + ', but seeds are upgraded locally, so they count as work.</p>' : '');
-}
-
-function keyItem(color, n, label){
- return '<span><i style="background:' + color + '"></i>' + n + ' ' + label + '</span>';
-}
-
-function tier(level, title, body, lv){
- // Level 1 only costs money while music is on; level 0 never does.
- const cash = (level === 1 && MUSIC) ? lv.dollars : [0, 0];
- return '<button class="tier' + (LEVEL === level ? ' on' : '') + '"'
-  + ' onclick="setLevel(' + level + ')"><div class="spread"><b>' + title + '</b>'
-  + '<span class="radio"></span></div><p>' + body + '</p>'
-  + '<div class="cost"><span>' + (lv.todo ? span(lv.seconds) : '—')
-  + ' <i>total</i></span><span>' + money(cash) + '</span></div></button>';
-}
-
-function musicRow(lv){
- if(LEVEL !== 1 || !PLAN.auddAvailable || !lv.todo) return '';
- // The cap is a local spend guard, not an AudD tier: AudD's 300 free
- // requests are one-time at signup, so say whose limit this is.
- const cap = MUSIC && lv.titlesBeforeCap !== null
-  ? '<p class="sub warn">Your spend cap (' + PLAN.auddHeadroom
-    + ' calls left) stops music after about '
-    + plural(lv.titlesBeforeCap, 'title') + '. Raise XRAY_AUDD_BUDGET to '
-    + 'change it.</p>'
-  : '';
- return '<label class="row" style="margin-top:.7rem;font-size:13px">'
-  + '<input type="checkbox"' + (MUSIC ? ' checked' : '')
-  + ' onchange="setMusic(this.checked)"> Name songs'
-  + (MUSIC ? '<span class="meta">' + lv.cues[0] + '–' + lv.cues[1]
-             + ' cues, $0.005 each</span>' : '')
-  + '</label>' + cap;
-}
-
-function setMusic(on){ MUSIC = on; if(PLAN) renderPlan(); }
-function setLevel(l){ LEVEL = l; if(PLAN) renderPlan(); }
-
-// A full index with music off is a video-only run: the pipeline's own skip
-// list, not a second code path.
-function runSkip(level){ return (level === 1 && !MUSIC) ? 'music' : ''; }
-
-async function queueLibrary(){
- const r = await post('api/run',
-  {library: LIB, level: LEVEL, skip: runSkip(LEVEL)});
- if(!r.ok) return alert((await r.json()).detail);
- poll();
-}
-
-async function doSearch(){
- const q = $('q').value.trim();
- if(!q) return;
- $('results').innerHTML = '<p class="sub">searching…</p>';
- const r = await fetch('api/search?q=' + encodeURIComponent(q));
- if(!r.ok){ $('results').innerHTML = '<p class="sub warn">'
-  + esc((await r.json()).detail) + '</p>'; return; }
- const data = await r.json();
- if(!data.results.length){
-  $('results').innerHTML = '<p class="sub">no matches in the library</p>'; return; }
- $('results').innerHTML = '<div class="card">'
-  + data.results.map(resultRow).join('') + '</div>';
-}
-
-function resultRow(x){
- const rk = 'data-rk="' + esc(x.ratingKey) + '"';
- // A show is not playable, so it gets series-targeted buttons rather than the
- // per-item ones: there is no single file behind it to index.
- if(x.type === 'show'){
-  const sid = 'data-sid="' + esc(x.seriesId) + '"';
-  return '<div class="spread" style="padding:.25rem 0"><span>' + esc(x.label)
-   + (x.year ? ' <span class="meta">(' + esc(x.year) + ')</span>' : '')
-   + '</span><span class="row"><span class="mono">show</span>'
-   + '<button class="ghost sm" data-act="series" ' + sid
-   + ' data-level="0">Seed all</button>'
-   + '<button class="sm" data-act="series" ' + sid
-   + ' data-level="1">Full index all</button></span></div>';
- }
- const row = '<div class="spread" style="padding:.25rem 0"><span>' + esc(x.label)
-  + (x.year ? ' <span class="meta">(' + esc(x.year) + ')</span>' : '')
-  + '</span><span class="row"><span class="mono">' + esc(x.type) + '</span>'
-  + '<button class="ghost sm" data-act="queue" ' + rk + ' data-level="0">Seed</button>'
-  + '<button class="sm" data-act="queue" ' + rk + ' data-level="1">Full index</button>'
-  + '</span></div>';
- // An episode brings its whole show with it, so the bulk options sit BELOW
- // the episode's own row instead of replacing it. Doing a whole series is the
- // common case; doing one episode is still a case, and dropping `row` here
- // left no way to reach it at all.
- if(!x.seriesId) return row;
- const sid = 'data-sid="' + esc(x.seriesId) + '"';
- const show = esc(x.series || 'this show');
- let bulk = '<div class="meta" style="padding:0 0 .35rem">'
-  + 'All of ' + show + ': '
-  + '<button class="link sm" data-act="series" ' + sid + ' data-level="0">seed</button>'
-  + ' · <button class="link sm" data-act="series" ' + sid
-  + ' data-level="1">full index</button>';
- // Season 0 is Specials — a real season — so test for a number, not truthiness.
- if(x.season !== null && x.season !== undefined && x.season !== ''){
-  const sn = Number(x.season);
-  const ssn = ' data-season="' + sn + '"';
-  bulk += '<br>Season ' + sn + ' only: '
-   + '<button class="link sm" data-act="series" ' + sid + ssn + ' data-level="0">seed</button>'
-   + ' · <button class="link sm" data-act="series" ' + sid + ssn
-   + ' data-level="1">full index</button>';
- }
- return row + bulk + '</div>';
-}
-
-async function queueSeries(seriesId, level, season){
- // `season` arrives from a data attribute, so it is a string or undefined.
- // Season 0 is Specials: only undefined/'' means "the whole show".
- const body = {series: seriesId, level, skip: runSkip(level)};
- if(season !== undefined && season !== '') body.season = Number(season);
- const r = await post('api/run', body);
- if(!r.ok) return alert((await r.json()).detail);
- $('results').innerHTML = ''; $('q').value = '';
- poll();
-}
-
-async function queueOne(ratingKey, level){
- const r = await post('api/run',
-  {rating_key: ratingKey, level, skip: runSkip(level)});
- if(!r.ok) return alert((await r.json()).detail);
- $('results').innerHTML = ''; $('q').value = '';
- poll();
-}
-
-// The pipeline's four passes. Running one alone is "skip the other three",
-// which is the same `skip` a whole-library run already takes — so a single
-// pass on one title needs no endpoint of its own.
-const PASSES = ['index', 'people', 'trivia', 'music'];
-
-// contentId -> the passes ticked on that row. Outside the DOM because the
-// store table is rebuilt on every poll, which would otherwise clear a
-// selection every couple of seconds while the user was still making it.
-const picked = new Map();
-
-function togglePick(cid, pass){
- const sel = picked.get(cid) || new Set();
- if(sel.has(pass)) sel.delete(pass); else sel.add(pass);
- if(sel.size) picked.set(cid, sel); else picked.delete(cid);
- loadStore();          // repaint now; waiting for the poll feels broken
-}
-
-async function deepenRow(ratingKey, cid, label){
- const sel = picked.get(cid);
- // No selection means "fill every gap", which is what Deepen always did.
- // A selection means exactly those passes: skip is everything else.
- const skip = sel && sel.size
-   ? PASSES.filter(p => !sel.has(p)).join(',')
-   : runSkip(1);
- // Money is the only thing worth interrupting for. Confirm whenever music
- // will actually run — including the no-selection case, which used to bill
- // silently for anyone with an AudD token configured.
- const willBillForMusic = sel && sel.size
-   ? sel.has('music')
-   : (SETUP && SETUP.auddConfigured);
- if(willBillForMusic && !confirm(
-      'Identify songs in ' + (label || 'this title') + '?\n\n'
-      + 'Billed per music cue, about $0.005 each — roughly $0.10–$0.20 '
-      + 'for a feature film. The other passes are free.')) return;
- const r = await post('api/run',
-   {rating_key: ratingKey, level: 1, skip: skip});
- if(!r.ok) return alert((await r.json()).detail);
- picked.delete(cid);                  // the run owns it now
- $('results').innerHTML = ''; $('q').value = '';
- poll();
-}
-
-// ---- jobs ------------------------------------------------------------------
-
-const STEP_LABEL = {index:'indexing', people:'cast', trivia:'trivia', music:'music'};
-// Phase names are the pass's vocabulary; these are the viewer's.
-const PHASE_LABEL = {frames:'reading the video', faces:'finding faces',
-                     matching:'matching cast', writing:'writing'};
-
-function phaseText(job){
- if(!job.phase) return 'working…';
- const label = PHASE_LABEL[job.phase] || job.phase;
- // Only the face pass knows its denominator; the rest are honest labels with
- // no number rather than a bar that invents one.
- return job.phaseTotal > 0
-  ? label + ' ' + Math.floor(100 * job.phaseDone / job.phaseTotal) + '%'
-  : label + '…';
-}
-
-async function poll(){
- const jobs = await j(await fetch('api/jobs'));
- const live = jobs.find(x => x.status === 'running' || x.status === 'queued');
- if(!live){
-  const last = jobs[0];
-  $('jobView').innerHTML = last
-   ? '<div class="spread"><span class="meta">Last run: ' + esc(last.target || '')
-     + ' · ' + esc(last.status) + ' · ' + last.done + '/' + last.total
-     + '</span><button class="link sm" data-act="log" data-id="' + last.id
-   + '">show log</button></div>'
-   : '';
-  loadStore();
-  return;
- }
- // The log rides along only while it is open. Folded away, the strip needs
- // one line and a count, which log=0 now carries.
- const job = await j(await fetch('api/jobs?log=' + (logOpen ? 1 : 0)
-   + '&id=' + live.id));
- const total = job.total || 0, done = (job.summary || []).length;
- // Within-title position folded into the overall bar, so one title creeps
- // forward instead of jumping 0→100, and a library run still measures titles.
- const frac = job.phaseFrac || 0;
- const pct = total ? (100 * Math.min(done + frac, total) / total).toFixed(1) : 0;
- // The rating key is what the user typed; the title is what they meant.
- const live_name = job.currentTitle || job.current;
- const rows = (job.summary || []).slice(-6).map(rowFor).join('')
-  + (job.current && done < total
-     ? '<div class="q live"><span class="ic pulse">●</span>'
-       + '<span class="nm">' + esc(live_name) + '</span>'
-       + '<span class="dt">' + esc(phaseText(job)) + '</span></div>' : '');
- // One title can only ever read 0/1 or 1/1, which looks stuck for the several
- // minutes a full index takes. Show the phase there and keep the count for
- // runs where it actually counts something.
- const counter = total > 1 ? done + ' / ' + total : esc(phaseText(job));
- $('jobView').innerHTML =
-  '<div class="sec"><div class="spread"><h2>'
-  + (job.request && job.request.level ? 'Indexing ' : 'Seeding ')
-  + esc(total === 1 ? (live_name || job.target || '') : (job.target || ''))
-  + '</h2><span class="mono">' + counter
-  + ' <button class="link sm" data-act="stop" data-id="' + job.id + '">'
-  + (job.cancel ? 'stopping…' : 'stop') + '</button>'
-  + '</span></div><div class="track"><div class="fill" style="width:' + pct
-  + '%"></div></div><div>' + rows + '</div>'
-  + logStrip(job) + '</div>';
- loadStore();
-}
-
-// jobView is rebuilt from scratch on every poll, so "is the log open" has to
-// live outside it or the panel would fold itself back up every few seconds.
-let logOpen = false;
-
-const LOG_TAIL = 14;
-
-function logStrip(job){
- const n = job.logLines || (job.log || []).length;
- if(!n) return '';
- if(!logOpen){
-  // Collapsed: newest line only. That line is the one carrying news, and a
-  // count tells you how much you are not looking at.
-  return '<div class="logbar" data-act="toglog"><span class="lg">'
-   + '<i class="chev">&rsaquo;</i> ' + esc(job.lastLine || '') + '</span>'
-   + '<span class="dt">' + n + ' line' + (n === 1 ? '' : 's') + '</span></div>';
- }
- const tail = (job.log || []).slice(-LOG_TAIL);
- return '<div class="logbar open" data-act="toglog"><span class="lg">'
-  + '<i class="chev down">&rsaquo;</i> log</span>'
-  + '<span class="dt">' + n + ' line' + (n === 1 ? '' : 's') + '</span></div>'
-  + '<pre class="logtail">' + esc(tail.join('\n')) + '</pre>'
-  + (n > LOG_TAIL
-     ? '<div><button class="link sm" data-act="log" data-id="' + job.id
-       + '">show all ' + n + '</button></div>' : '');
-}
-
-function rowFor(s){
- const steps = s.steps || {};
- const failed = Object.entries(steps).filter(([, v]) => String(v).startsWith('failed'));
- const noId = String(steps.index || '').includes('no content identity');
- if(noId) return '<div class="q bad"><span class="ic">!</span><span class="nm">'
-  + esc(s.title) + '</span><span class="dt">no TMDb match · skipped</span></div>';
- const cls = failed.length ? 'bad' : 'done';
- const detail = failed.length
-  ? failed.map(([kk]) => kk).join(', ') + ' failed'
-  : (steps.index === 'hub' ? 'from the hub' : esc(s.key));
- return '<div class="q ' + cls + '"><span class="ic">'
-  + (failed.length ? '!' : '✓') + '</span><span class="nm">' + esc(s.title)
-  + '</span><span class="dt">' + detail + '</span></div>';
-}
-
-async function stopJob(id){
- await post('api/jobs/' + id + '/stop', {});
- poll();   // reflect "stopping…" now; the worker lands it at the next marker
-}
-
-async function showLog(id){
- const jb = await j(await fetch('api/jobs?id=' + id));
- $('out').hidden = false;
- $('out').textContent = (jb.log || []).join('\n') || '(no log yet)';
-}
-
-// ---- store -----------------------------------------------------------------
-
-async function loadStore(){
- const s = await j(await fetch('api/status'));
- // No AudD figure here. The 300 is AudD's one-time signup allowance and the
- // cap is ours, but the counter resets each calendar month, so "0/300 this
- // month" promised a recurring allowance that does not exist. The planner
- // still prices a run before it starts, which is where the number helps.
- $('stat').textContent = s.backend + ' · ' + (s.origin || 'no server');
- const seeds = s.titles.filter(t => !t.blocks.faces).length;
- const rows = s.titles.map(t => {
-  const rk = (t.lookup[0] || '').split(':')[1];
-  // A present block is a state; a missing one is an offer. Clicking an offer
-  // TICKS it rather than running it: picking faces and music separately would
-  // queue two jobs and stream the media twice, where one job harvests the
-  // audio during frame extraction and the music pass reuses that file.
-  //
-  // Needs a server key: every pass runs through the pipeline against the
-  // media server, so a timeline fetched from the hub with no local copy has
-  // nothing to run against and stays a plain chip.
-  const sel = picked.get(t.contentId) || new Set();
-  const chip = (label, pass, on, paid) => {
-   if (on) return '<span class="chip">' + label + '</span>';
-   if (!rk) return '<span class="chip off">' + label + '</span>';
-   const ticked = sel.has(pass);
-   return '<button class="chip add' + (paid ? ' paid' : '')
-    + (ticked ? ' on' : '') + '" aria-pressed="' + ticked + '"'
-    + ' data-act="pick" data-cid="' + esc(t.contentId)
-    + '" data-pass="' + pass + '"'
-    + ' title="' + (paid
-       ? 'Identify songs — billed per cue, about $0.10–0.20 for a feature'
-       : 'Add ' + label + ' to this title — free') + '">'
-    + (ticked ? '✓ ' : '+ ') + label + '</button>';
-  };
-  return '<tr><td>' + storeLabel(t)
-   + '<div class="mono">' + esc(t.contentId) + '</div>'
-   + '</td><td><div class="chips">'
-   + chip('cast', 'people', t.blocks.people)
-   + chip('faces', 'index', t.blocks.faces)
-   + chip('music', 'music', t.blocks.music, true)
-   + chip('trivia', 'trivia', t.blocks.trivia)
-   + '</div></td><td class="acts">'
-   // Offered whenever anything is missing, not just faces: with a selection
-   // it runs exactly what is ticked, and with none it fills every gap.
-   + ((rk && (!t.blocks.faces || !t.blocks.music || !t.blocks.people
-              || !t.blocks.trivia))
-      ? '<button class="ghost sm" data-act="deepen" data-rk="' + esc(rk)
-        + '" data-cid="' + esc(t.contentId) + '" data-label="'
-        + esc(storeLabel(t).replace(/<[^>]*>/g, '')) + '">'
-        + (sel.size ? 'Run ' + sel.size + ' selected' : 'Deepen')
-        + '</button> ' : '')
-   + '<a class="ghost" href="api/export/' + encodeURIComponent(t.contentId)
-   + '">export</a>'
-   // Direct upload only where this machine holds a hub token; otherwise the
-   // button could only ever report the hub's refusal, so it isn't offered.
-   + (SETUP && SETUP.hubDirectUpload
-      ? ' <button class="sm" data-act="share" data-cid="'
-        + esc(t.contentId) + '">Share</button>' : '')
-   + '</td></tr>';
- }).join('');
- const auto = SETUP && SETUP.hubAutoshare;
- $('storeView').innerHTML =
-  '<div class="spread"><h2>Store</h2><span class="mono">'
-  + plural(s.titles.length, 'timeline') + '</span></div>'
-  // Auto-share can only work where direct upload can. Offering the toggle
-  // otherwise promises a thing that ends in the hub's 403, once per title.
-  + (SETUP && SETUP.hubUrl && SETUP.hubDirectUpload
-     ? '<label class="row" style="font-size:13px"><input type="checkbox"'
-       + (auto ? ' checked' : '') + ' onchange="setAutoshare(this.checked)">'
-       + ' Share new timelines automatically'
-       + '<span class="meta">' + (auto
-          ? 'each title is sent for review as it finishes'
-          : 'off: use Share per title') + '</span></label>'
-     : '')
-  + (SETUP && SETUP.hubUrl && !SETUP.hubDirectUpload && s.titles.length
-     ? '<div class="note"><span>Contributing is two steps: build a bundle '
-       + 'here, then upload it on the hub&rsquo;s contribute page. One bundle '
-       + 'covers your whole store and counts as a single upload.</span>'
-       + '<button class="sm" data-act="bundle">Export bundle</button></div>'
-     : '')
-  + '<div id="bundleOut" class="note" hidden></div>'
-  + (s.titles.length
-     ? '<div class="scroll"><table><thead><tr><th>Title</th><th>Contains</th>'
-       + '<th></th></tr></thead><tbody>' + rows + '</tbody></table></div>'
-       + (seeds ? '<div class="note"><span><b>' + plural(seeds, 'title')
-          + '</b> ' + (seeds === 1 ? 'has' : 'have') + ' no face intervals '
-          + 'yet. Deepen to add them'
-          + (SETUP && SETUP.auddConfigured ? ' and the song names' : '')
-          + '.</span></div>' : '')
-     : '<p class="sub">Nothing indexed yet.</p>')
-  + '<div class="row"><input id="importSrc" style="flex:1" '
-  + 'placeholder="import URL (hub or shared file)">'
-  + '<button class="ghost" onclick="doImport()">Import</button>'
-  + '<button class="ghost" onclick="doValidate()">Validate all</button></div>';
- paintBundle();   // the markup above just recreated an empty #bundleOut
-}
-
-// Season/episode come from the contentId, not the doc: one source of truth,
-// so the label can never disagree with the identity the file is stored under.
-const EP_RE = /^tmdb-tv-\d+-s(\d{2})e(\d{2})$/;
-
-function storeLabel(t){
- if(!t.title) return '<b>' + esc(t.contentId) + '</b>';
- const m = EP_RE.exec(t.contentId);
- if(t.series && m) return '<b>' + esc(t.series) + '</b> S' + m[1] + 'E' + m[2]
-  + ' · ' + esc(t.title);
- if(t.series) return '<b>' + esc(t.series) + '</b> · ' + esc(t.title);
- return '<b>' + esc(t.title) + '</b>'
-  + (t.year ? ' <span class="meta">(' + esc(t.year) + ')</span>' : '');
-}
-
-async function setAutoshare(on){
- // Empty string deletes the key: settings_store's own off switch.
- await fetch('api/settings', {method:'PUT',
-  headers:{'content-type':'application/json'},
-  body: JSON.stringify({hub_autoshare: on ? 'on' : ''})});
- SETUP.hubAutoshare = on;
- loadStore();
-}
-
-async function hubUpload(cid){
- const r = await post('api/hub/upload/' + encodeURIComponent(cid));
- $('out').hidden = false;
- $('out').textContent = JSON.stringify(await r.json(), null, 1);
-}
-// The Store section is rebuilt every poll, which used to wipe the download
-// links a few seconds after the bundle was written. Keep the rendered result
-// here and let loadStore paint it back.
-let bundleResult = '';
-
-function paintBundle(){
- const box = $('bundleOut');
- if(!box) return;
- box.hidden = !bundleResult;
- box.innerHTML = bundleResult;
-}
-
-async function exportBundle(btn){
- btn.disabled = true; btn.textContent = 'Bundling…';
- bundleResult = '<span>Writing the bundle…</span>';
- paintBundle();
- try {
-  const r = await post('api/export/bundle', {contentIds: []});
-  const d = await r.json();
-  if(!r.ok){
-   bundleResult = '<span>' + esc((d.detail && d.detail.reason) || d.detail
-     || 'export failed') + '</span>';
-   paintBundle();
-   return;
-  }
-  // Chunked when a hub would refuse the whole thing; each file uploads
-  // separately, so link every one rather than only the first.
-  const kb = Math.round(d.bytes / 1024);
-  const links = d.files.map(n => '<a class="ghost" href="api/export/bundle/'
-    + encodeURIComponent(n) + '">' + esc(n) + '</a>').join(' ');
-  bundleResult = '<span>' + plural(d.timelines, 'timeline') + ' in '
-   + plural(d.files.length, 'file') + ' (' + kb + ' KB). Download, then upload '
-   + 'at <a href="' + esc((SETUP.hubUrl || '').replace(/\/$/, ''))
-   + '/contribute" target="_blank" rel="noopener noreferrer">the hub&rsquo;s '
-   + 'contribute page</a>.</span><span>' + links + '</span>';
-  paintBundle();
- } finally {
-  btn.disabled = false; btn.textContent = 'Export bundle';
- }
-}
-async function doImport(){
- const src = $('importSrc').value.trim();
- if(!src) return;
- const r = await post('api/import', {src});
- $('out').hidden = false;
- $('out').textContent = JSON.stringify(await r.json(), null, 1);
- loadStore();
-}
-async function doValidate(){
- const r = await j(await fetch('api/validate'));
- $('out').hidden = false;
- $('out').textContent = r.results.map(x =>
-  x.file + ': ' + (x.valid ? 'VALID' : 'INVALID: ' + x.error)).join('\n')
-  || '(store is empty)';
-}
-
-loadSetup();
-setInterval(poll, 4000);
-</script>"""
+_DASH_PAGE = (_HEAD + "<title>OpenXray Generator</title>" + _STYLE
+              + _asset("dashboard.html")
+              + "<script>" + _asset("dashboard.js")
+              + _asset("labelling.js") + "</script>")
 
 
 @app.get("/login", response_class=HTMLResponse)

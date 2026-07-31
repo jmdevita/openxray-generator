@@ -25,6 +25,17 @@ from ..frames import extract_frames
 from ..sources.base import MediaSource
 
 
+class Unsupported(Exception):
+    """This title is outside what the pass can do, and retrying won't help.
+
+    Distinct from a failure: nothing went wrong, the input simply isn't
+    something a human-face detector can process. `pipeline.step` records it as
+    `skipped:` so the dashboard shows a limitation rather than an error, and a
+    batch run over a mixed library doesn't look broken because it contains
+    cartoons.
+    """
+
+
 @dataclass
 class IndexOptions:
     fps: float = 0.5
@@ -36,23 +47,59 @@ class IndexOptions:
     max_frames: int = 0
 
 
+#: Provenance blocks whose pass PRODUCES actorIntervals. A doc carrying none
+#: of these is a seed (run_level0), which writes an empty interval list by
+#: design and must never overwrite real work.
+IDENTITY_BLOCKS = ("faces", "voice")
+
+#: Which `source` value each block's intervals carry. Intervals predating the
+#: field have no `source`, and those are all face-derived, so absent reads as
+#: "face" rather than as unknown.
+_BLOCK_SOURCE = {"faces": "face", "voice": "voice"}
+
+
+def _interval_source(interval: dict) -> str:
+    return interval.get("source") or "face"
+
+
 def merge_preserved(old: dict, new: dict) -> dict:
     """Carry enrichment blocks from an existing timeline into a re-indexed one.
 
-    Re-indexing regenerates ONLY the core (cast + actorIntervals + faces
-    provenance); music, trivia, and per-actor person data are other passes'
-    work, because losing them on re-index would throw away paid AudD calls and
-    cached enrichment. Person data merges by actorId (cast lists can shift
-    between TMDb snapshots)."""
-    # A seed must never overwrite an index. run_level0 writes empty intervals
-    # and no faces stamp by design, so without this a level-0 pass across a
-    # library silently downgrades every title already indexed — throwing away
-    # the minutes of frame decoding and face embedding that produced them.
-    # "New has no faces stamp" is exactly what distinguishes a seed from a
-    # re-index, which does regenerate both and must be allowed to replace them.
-    if "faces" not in (new.get("provenance") or {}) and "faces" in (old.get("provenance") or {}):
+    Re-indexing regenerates ONLY what the pass that ran actually produces;
+    music, trivia, and per-actor person data are other passes' work, because
+    losing them on re-index would throw away paid AudD calls and cached
+    enrichment. Person data merges by actorId (cast lists can shift between
+    TMDb snapshots)."""
+    old_prov = old.get("provenance") or {}
+    new_prov = new.get("provenance") or {}
+    old_ident = {b for b in IDENTITY_BLOCKS if b in old_prov}
+    new_ident = {b for b in IDENTITY_BLOCKS if b in new_prov}
+
+    if not new_ident and old_ident:
+        # A seed. run_level0 writes empty intervals and no identity stamp by
+        # design, so without this a level-0 pass across a library silently
+        # downgrades every title already indexed — throwing away the minutes
+        # of frame decoding and face embedding that produced them.
         new["actorIntervals"] = old.get("actorIntervals") or []
-        new.setdefault("provenance", {})["faces"] = old["provenance"]["faces"]
+        for block in old_ident:
+            new.setdefault("provenance", {})[block] = old_prov[block]
+    elif new_ident:
+        # A real pass. It may replace ONLY the sources it regenerated: a voice
+        # pass must not delete face intervals, and vice versa. Keying on the
+        # bare presence of a faces stamp (the previous rule) meant any pass
+        # that wasn't faces had its intervals silently swapped for the old
+        # face ones while its own provenance block survived — a file claiming
+        # a pass ran while carrying none of its output.
+        regenerated = {_BLOCK_SOURCE[b] for b in new_ident}
+        kept = [iv for iv in (old.get("actorIntervals") or [])
+                if _interval_source(iv) not in regenerated]
+        merged = kept + list(new.get("actorIntervals") or [])
+        merged.sort(key=lambda iv: (iv.get("startMs") or 0,
+                                    iv.get("endMs") or 0))
+        new["actorIntervals"] = merged
+        for block in old_ident - new_ident:
+            new.setdefault("provenance", {})[block] = old_prov[block]
+
     for block in ("musicIntervals", "trivia"):
         if old.get(block):
             new[block] = old[block]
@@ -144,6 +191,22 @@ def run(store_dir: Path, work_dir: Path, *, source: MediaSource,
     else:
         bundle = refsmod.movie_bundle(item["tmdbId"], tmdb_key)
     cast, labels = bundle["cast"], bundle["labels"]
+
+    # Refuse animation BEFORE the extraction, not after. The face stack is
+    # YuNet + SFace; both need five-point human landmarks, and most animated
+    # principals are not humanoid (Donkey, Puss, Gingy). Running anyway costs
+    # a full media pull and yields an empty actorIntervals with no
+    # explanation, which reads as a bug rather than a limitation.
+    # docs/ANIMATION.md carries the assessment and the voice alternative.
+    if bundle.get("animated"):
+        # Redirect, not a dead end. Until the speakers pass existed this said
+        # "use level 0", which was the honest answer then and is the wrong one
+        # now: there IS a way to index an animated title, it just listens
+        # instead of looking.
+        raise Unsupported(
+            "animated title — faces need human facial landmarks and most "
+            "animated characters have none. Run the speakers pass instead: "
+            "it finds who talks and when, then asks you to name them")
 
     if dry_run:
         print(f"[dry-run] would index → {content_id or item['ratingKey']} "

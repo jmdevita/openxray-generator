@@ -29,12 +29,13 @@ SEEDS = {
     "jellyfin_user": "JELLYFIN_USER",
     "tmdb_key": "TMDB_KEY",
     "audd_token": "AUDD_API_TOKEN",
+    "hf_token": "HF_TOKEN",
     "hub_url": "XRAY_HUB_URL",
 }
 
 #: never returned un-redacted by the API, never logged
 SECRET_KEYS = {"plex_token", "jellyfin_token", "tmdb_key", "audd_token",
-               "web_token"}
+               "hf_token", "web_token"}
 
 
 def settings_path() -> Path | None:

@@ -82,6 +82,28 @@ def _year(date_str):
     return int(head) if head.isdigit() else None
 
 
+#: TMDb's Animation genre. Same id for movies and TV.
+ANIMATION_GENRE_ID = 16
+
+
+def _is_animated(details: dict) -> bool:
+    """Is this an animated title, per TMDb's genre list?
+
+    Free: `genres` already rides along in the details response the cast call
+    makes, so this costs no extra request. Matched on the numeric id, not the
+    name, because `name` is localised.
+
+    Faces cannot work on animation (see docs/ANIMATION.md): YuNet needs
+    five-point human landmarks and most animated principals are not humanoid.
+    Callers use this to skip the face passes rather than spend a full
+    extraction producing an empty timeline.
+    """
+    for g in (details.get("genres") or []):
+        if isinstance(g, dict) and g.get("id") == ANIMATION_GENRE_ID:
+            return True
+    return False
+
+
 def movie_bundle(tmdb_id, api_key, max_images=5, max_cast=60, timeout=20):
     """Credits AND display labels for a film, in ONE request.
 
@@ -102,6 +124,7 @@ def movie_bundle(tmdb_id, api_key, max_images=5, max_cast=60, timeout=20):
         "labels": {"title": j.get("title") or j.get("original_title"),
                    "year": _year(j.get("release_date")),
                    "series": None},
+        "animated": _is_animated(j),
     }
 
 
@@ -133,6 +156,7 @@ def episode_bundle(tv_id, api_key, season=1, episode=1, max_images=5,
     """
     people = {}  # pid -> (name, character, profile_path, order)
     labels = {"title": None, "year": None, "series": None}
+    animated = False   # series-level: the show is animated, not the episode
 
     ac = requests.get(f"{TMDB}/tv/{tv_id}",
                       params={"api_key": api_key,
@@ -141,6 +165,7 @@ def episode_bundle(tv_id, api_key, season=1, episode=1, max_images=5,
     if ac.ok:
         j = ac.json()
         labels["series"] = j.get("name") or j.get("original_name")
+        animated = _is_animated(j)
         for c in (j.get("aggregate_credits") or {}).get("cast", []):
             char = c["roles"][0].get("character", "") if c.get("roles") else ""
             people[c["id"]] = (c.get("name", ""), char, c.get("profile_path"),
@@ -165,6 +190,7 @@ def episode_bundle(tv_id, api_key, season=1, episode=1, max_images=5,
         "cast": [_tmdb_member(pid, n, ch, pp, api_key, max_images)
                  for pid, (n, ch, pp, _order) in ordered],
         "labels": labels,
+        "animated": animated,
     }
 
 

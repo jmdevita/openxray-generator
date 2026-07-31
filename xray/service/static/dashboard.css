@@ -1,0 +1,273 @@
+:root{--paper:#f7f7f4;--raise:#fff;--ink:#16181a;--muted:#6b7370;
+  --faint:#9aa19d;--line:#dcdedb;--soft:#e9eae7;--accent:#2f5d55;
+  --wash:#e4ede9;--ok:#2e6b46;--warn:#8a5a12;--stop:#8f3a2f;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+ @media(prefers-color-scheme:dark){:root{--paper:#131517;--raise:#1a1d1f;
+  --ink:#e8eae8;--muted:#98a09c;--faint:#6b7370;--line:#2b2f31;--soft:#232729;
+  --accent:#63a894;--wash:#1e2b28;--ok:#6aab84;--warn:#c69248;--stop:#cf7d6e}}
+ *{box-sizing:border-box}
+ /* .sec sets display:flex at the same specificity as the UA's
+    [hidden]{display:none}, so without this the setup gate hides nothing. */
+ [hidden]{display:none!important}
+ body{margin:0;background:var(--paper);color:var(--ink);
+  font:14px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  -webkit-font-smoothing:antialiased}
+ main{max-width:62rem;margin:0 auto;padding:1.4rem 1.25rem 5rem;
+  display:flex;flex-direction:column;gap:1.6rem}
+ header{max-width:62rem;margin:0 auto;padding:1.1rem 1.25rem .2rem;
+  display:flex;justify-content:space-between;align-items:baseline;
+  gap:1rem;flex-wrap:wrap}
+ .brand{display:flex;align-items:center;gap:.55rem;font-weight:640;
+  font-size:15px;letter-spacing:-.01em}
+ .mark{width:17px;height:17px;border-radius:4px;background:var(--accent);
+  flex:none;display:grid;place-items:center}
+ .mark i{display:block;width:9px;height:1.5px;background:var(--paper);
+  box-shadow:0 -3.5px 0 var(--paper),0 3.5px 0 var(--paper)}
+ .stat{font:12px var(--mono);color:var(--faint);font-variant-numeric:tabular-nums}
+ h2{font-size:14px;font-weight:640;margin:0;letter-spacing:-.008em}
+ p.sub{margin:.15rem 0 0;color:var(--muted);font-size:13px}
+ .sec{display:flex;flex-direction:column;gap:.85rem}
+ .card{border:1px solid var(--line);border-radius:9px;padding:.9rem 1rem;
+  background:var(--raise)}
+ .row{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}
+ .spread{display:flex;justify-content:space-between;align-items:center;
+  gap:1rem;flex-wrap:wrap}
+ .meta{color:var(--muted);font-size:12.5px}
+ .mono{font:11.5px var(--mono);color:var(--faint)}
+ .ok{color:var(--ok)}.warn{color:var(--warn)}.miss{color:var(--faint)}
+ input,select{padding:.45rem .6rem;border:1px solid var(--line);border-radius:6px;
+  background:var(--raise);color:var(--ink);font:13px var(--mono);min-width:0}
+ input:focus-visible,select:focus-visible,button:focus-visible{outline:2px solid
+  var(--accent);outline-offset:1px}
+ button{padding:.45rem .8rem;border-radius:6px;background:var(--accent);
+  color:var(--paper);border:1px solid var(--accent);cursor:pointer;
+  font:600 13px ui-sans-serif,system-ui,sans-serif;white-space:nowrap}
+ button.ghost{background:transparent;color:var(--ink);border-color:var(--line)}
+ button.link{background:none;border:none;color:var(--muted);padding:.4rem .2rem;
+  font-weight:500;text-decoration:underline;text-underline-offset:3px}
+ button.sm{padding:.24rem .55rem;font-size:12px}
+ button[disabled]{opacity:.45;cursor:not-allowed}
+ a.ghost{padding:.24rem .55rem;font-size:12px;border:1px solid var(--line);
+  border-radius:6px;color:var(--ink);text-decoration:none}
+ pre{background:var(--soft);padding:.7rem .8rem;border-radius:7px;font-size:12px;
+  overflow:auto;max-height:22rem;margin:0}
+ .code{font:700 26px var(--mono);letter-spacing:6px}
+ /* setup steps */
+ .step{display:flex;gap:.85rem;padding:.9rem 1rem;border:1px solid var(--line);
+  border-radius:9px;align-items:flex-start;background:var(--raise)}
+ .step.done{border-color:var(--soft)}
+ .step.now{border-color:var(--accent);background:var(--wash)}
+ .step.opt{border-style:dashed;border-color:var(--soft);background:transparent}
+ .bul{width:20px;height:20px;border-radius:50%;flex:none;display:grid;
+  place-items:center;font:600 11px var(--mono);margin-top:1px}
+ .step.done .bul{background:var(--ok);color:var(--paper)}
+ .step.now .bul{background:var(--accent);color:var(--paper)}
+ .step.opt .bul{background:var(--soft);color:var(--faint)}
+ .step .body{flex:1;min-width:0;display:flex;flex-direction:column;gap:.5rem}
+ .step p{margin:0;color:var(--muted);font-size:13px;max-width:36rem}
+ .tag{font:600 10.5px var(--mono);letter-spacing:.08em;text-transform:uppercase;
+  padding:.28rem .45rem;border-radius:4px;flex:none}
+ .tag.g{background:var(--wash);color:var(--accent)}
+ .tag.n{background:var(--soft);color:var(--faint)}
+ /* tiers */
+ .tiers{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));
+  gap:.7rem}
+ .tier{border:1px solid var(--line);border-radius:9px;padding:.9rem 1rem;
+  display:flex;flex-direction:column;gap:.5rem;cursor:pointer;text-align:left;
+  background:var(--raise);color:inherit;font:inherit;
+  /* these are buttons, so they inherit button{white-space:nowrap}; without
+     this the description cannot wrap and the page scrolls sideways */
+  white-space:normal;
+  transition:border-color .15s,background .15s}
+ .tier:hover{border-color:var(--muted)}
+ .tier.on{border-color:var(--accent);background:var(--wash);
+  box-shadow:inset 0 0 0 1px var(--accent)}
+ .tier b{font-size:13.5px;font-weight:640}
+ .tier p{margin:0;color:var(--muted);font-size:12.5px;flex:1}
+ .tier .cost{display:flex;gap:.9rem;font:12px var(--mono);
+  border-top:1px solid var(--soft);padding-top:.5rem;
+  font-variant-numeric:tabular-nums}
+ .tier .cost i{font-style:normal;color:var(--faint)}
+ .radio{width:14px;height:14px;border-radius:50%;border:1.5px solid var(--line);
+  flex:none;display:grid;place-items:center}
+ .tier.on .radio{border-color:var(--accent)}
+ .tier.on .radio::after{content:"";width:7px;height:7px;border-radius:50%;
+  background:var(--accent)}
+ /* coverage bar */
+ .cov{display:flex;height:7px;border-radius:4px;overflow:hidden;
+  background:var(--soft)}
+ .cov span{display:block}
+ .cov .f{background:var(--accent)}
+ .cov .s{background:var(--accent);opacity:.45}
+ .cov .h{background:var(--ok);opacity:.6}
+ .key{display:flex;gap:.9rem;flex-wrap:wrap;font-size:12.5px;color:var(--muted);
+  font-variant-numeric:tabular-nums}
+ .key i{width:8px;height:8px;border-radius:2px;display:inline-block;
+  margin-right:.35rem}
+ /* progress + queue */
+ .track{height:5px;border-radius:3px;background:var(--soft);overflow:hidden}
+ .fill{height:100%;background:var(--accent);border-radius:3px;
+  transition:width .4s ease}
+ .q{display:grid;grid-template-columns:1.1rem 1fr auto;gap:.7rem;
+  align-items:center;padding:.4rem 0;border-bottom:1px solid var(--soft);
+  font-size:13px}
+ .q:last-child{border-bottom:none}
+ .q .ic{font:11px var(--mono);text-align:center}
+ .q.done .ic{color:var(--ok)}.q.live .ic{color:var(--accent)}
+ .q.bad .ic{color:var(--warn)}.q.bad .dt{color:var(--warn)}
+ /* skipped is a limitation, not an error: muted, so a library with cartoons
+    in it doesn't read as a wall of failures */
+ .q.skip .ic{color:var(--faint)}.q.skip .nm{opacity:.75}
+ .q .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ .q.live .nm{font-weight:600}
+ .q .dt{font:11.5px var(--mono);color:var(--faint);white-space:nowrap}
+ /* folded job log */
+ .logbar{display:flex;justify-content:space-between;align-items:center;
+  gap:.7rem;background:var(--soft);border-radius:6px;padding:.4rem .6rem;
+  cursor:pointer;user-select:none}
+ .logbar:hover{background:var(--wash)}
+ .logbar .lg{font:11.5px var(--mono);color:var(--muted);overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+ .logbar .dt{font:11.5px var(--mono);color:var(--faint);white-space:nowrap}
+ .chev{display:inline-block;font-style:normal;transition:transform .15s ease}
+ .chev.down{transform:rotate(90deg)}
+ .logtail{margin:.4rem 0 0;padding:.6rem .7rem;background:var(--soft);
+  border-radius:6px;font:11.5px/1.75 var(--mono);color:var(--muted);
+  white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere}
+ .chip.add.on{background:var(--accent);color:var(--paper);
+  border-color:var(--accent)}
+ .pulse{animation:blink 1.4s ease-in-out infinite}
+ @keyframes blink{0%,100%{opacity:1}50%{opacity:.35}}
+ /* store */
+ .scroll{overflow-x:auto}
+ table{border-collapse:collapse;width:100%;font-size:13px}
+ th{text-align:left;font:600 10.5px var(--mono);letter-spacing:.1em;
+  text-transform:uppercase;color:var(--faint);padding:0 .6rem .5rem 0;
+  border-bottom:1px solid var(--line)}
+ td{padding:.5rem .6rem .5rem 0;border-bottom:1px solid var(--soft);
+  vertical-align:middle}
+ tr:last-child td{border-bottom:none}
+ td.acts{text-align:right;white-space:nowrap}
+ .chips{display:flex;gap:.28rem;flex-wrap:wrap}
+ .chip{font:600 10.5px var(--mono);letter-spacing:.04em;padding:.3rem .42rem;
+  border-radius:4px;background:var(--wash);color:var(--accent)}
+ .chip.off{background:transparent;color:var(--faint);
+  box-shadow:inset 0 0 0 1px var(--soft)}
+ /* A missing block you can fill: dashed to read as an absence, not a state.
+    Only rendered when the title has a server key to run against. */
+ button.chip{border:0;cursor:pointer;font-family:var(--mono)}
+ button.chip.add{background:transparent;color:var(--accent);
+  box-shadow:inset 0 0 0 1px var(--soft)}
+ button.chip.add:hover{background:var(--wash)}
+ button.chip.add.paid{color:var(--warn)}
+ .note{display:flex;justify-content:space-between;align-items:center;gap:1rem;
+  flex-wrap:wrap;padding:.7rem .9rem;border-radius:8px;background:var(--wash);
+  font-size:13px;color:var(--accent)}
+ @media(prefers-reduced-motion:reduce){*{animation:none!important;
+  transition:none!important}}
+
+/* Speakers is the only block whose presence means "your turn", so it needs a
+   state the other chips never have: owed, not done.
+
+   Two elements with distinct jobs, following the table's grammar: .spkstate
+   is a FACT chip (dialogue-coverage bar + numbers) living with the other
+   chips; button.namebtn is the ACTION, in the acts column next to Deepen.
+   The previous design fused both into an underlined mono string that read as
+   a log line, and nobody could tell it was the one clickable thing.
+
+   Unique class names on purpose -- the `.note` collision (a chip label
+   silently restyling a full-width banner at equal specificity) is why. */
+.spkstate{display:inline-flex;align-items:center;gap:.45rem;
+ font:600 10.5px var(--mono);letter-spacing:.04em;padding:.3rem .5rem;
+ border-radius:6px;background:var(--soft);color:var(--faint)}
+.spkstate .mini{width:52px;height:5px;border-radius:3px;background:var(--line);
+ overflow:hidden;position:relative;flex:0 0 52px}
+.spkstate .mini i{position:absolute;left:0;top:0;bottom:0;border-radius:3px}
+.spkstate.owed{color:var(--warn)}
+.spkstate.owed .mini i{background:var(--warn)}
+.spkstate.ok{color:var(--ok)}
+.spkstate.ok .mini i{background:var(--ok)}
+
+button.namebtn{background:transparent;border:1px solid var(--warn);
+ color:var(--warn);padding:.24rem .55rem;font-size:12px;border-radius:6px;
+ cursor:pointer}
+button.namebtn:hover{background:var(--warn);color:var(--paper)}
+button.namebtn .n{font:600 10px var(--mono);background:var(--warn);
+ color:var(--paper);border-radius:8px;padding:.05rem .35rem;margin-left:.35rem}
+button.namebtn:hover .n{background:var(--paper);color:var(--warn)}
+
+/* The why-does-this-exist affordance, living INSIDE the speakers pill as a
+   flex child so the wrapping chips row can never orphan it. Inherits the
+   pill's state colour (amber/green/faint) at reduced opacity.
+
+   The tooltip is CSS (::after on data-tip), NOT a native title. The store
+   table is rebuilt on every poll, so an element only lives a few seconds --
+   a native tooltip's hover delay usually outlived its anchor and appeared to
+   do nothing. This one is instant, and shows on :focus too, so clicking the
+   dot (what people try first) also works. The panel resets the pill's mono
+   micro-typography back to readable prose. */
+.infodot{display:inline-grid;place-items:center;width:13px;height:13px;
+ flex:0 0 13px;border:1px solid currentColor;border-radius:50%;
+ font:600 9px var(--mono);color:inherit;opacity:.65;cursor:help;
+ user-select:none;position:relative;outline:none}
+.infodot:hover,.infodot:focus{opacity:1}
+.infodot::after{content:attr(data-tip);position:absolute;top:calc(100% + 8px);
+ right:-1.2rem;width:18rem;max-width:72vw;z-index:9;
+ background:var(--raise);color:var(--ink);border:1px solid var(--line);
+ border-radius:8px;padding:.6rem .75rem;box-shadow:0 10px 28px rgba(0,0,0,.35);
+ font:400 12.5px/1.55 ui-sans-serif,system-ui,sans-serif;letter-spacing:0;
+ white-space:normal;text-align:left;
+ opacity:0;visibility:hidden;transition:opacity .12s;pointer-events:none}
+.infodot:hover::after,.infodot:focus::after{opacity:1;visibility:visible}
+
+/* labelling.js still uses these for its inline notes (unsaved / recognised) */
+.spknote{font:11.5px var(--mono);margin-left:.45rem;white-space:nowrap}
+.spknote.ok{color:var(--ok)}
+.spknote.owed{color:var(--warn)}
+
+/* The Speakers setup step's body. Its own class because the content includes a
+   list and a button row, so it cannot be a <p> and pick up p.sub. */
+.spkbox{color:var(--muted);font-size:13px}
+.spkbox ul{margin:.4rem 0;padding-left:1.1rem}
+/* There is no bare `a` rule in this sheet -- only a.ghost -- so these fell
+   back to the UA default, which on the dark ground reads as struck-through.
+   They are the links in the state that most needs following. */
+.spkbox a{color:var(--accent);text-decoration:underline;
+ text-underline-offset:2px}
+.spkbox a:hover{color:var(--ink)}
+
+/* A shell command to copy. Wraps and scrolls rather than widening its column:
+   the whole reason this file is being touched is a card that did neither. */
+.cmd{margin:.45rem 0 0;padding:.5rem .6rem;border-radius:6px;
+ background:var(--wash);color:var(--ink);font:11.5px/1.6 var(--mono);
+ overflow-x:auto;white-space:pre-wrap;overflow-wrap:anywhere}
+
+/* labelling screen */
+.labrow{display:flex;align-items:center;gap:.9rem;padding:.7rem .2rem;
+ border-top:1px solid var(--line)}
+.labrow.on{background:var(--wash);border-radius:8px}
+.labrow.dirty{background:var(--soft);border-radius:8px}
+.labmid{flex:1;min-width:0}
+.labwho{width:15rem;flex:0 0 15rem}
+.labwho select{width:100%}
+.play{width:34px;height:34px;flex:0 0 34px;border-radius:50%;cursor:pointer;
+ background:var(--raise);border:1px solid var(--line);color:var(--ink);
+ font-size:12px}
+.play:hover{border-color:var(--accent)}
+.strip{height:18px;background:var(--soft);border-radius:4px;position:relative;
+ overflow:hidden}
+.strip i{position:absolute;top:0;bottom:0;background:var(--faint);
+ border-radius:1px}
+.labrow.named .strip i{background:var(--accent)}
+.chip.sug{border-style:dashed}
+.tiny{font-size:11.5px}
+.bar{height:5px;background:var(--soft);border-radius:3px;overflow:hidden;
+ margin:.5rem 0 1rem}
+.bar i{display:block;height:100%;background:var(--ok);transition:width .3s}
+/* Always visible, even with nothing staged: a save control that appears only
+   once it has work to do is invisible exactly when you go looking for it. */
+.savebar{position:sticky;bottom:.6rem;margin-top:1rem;display:flex;
+ align-items:center;justify-content:space-between;gap:1rem;
+ background:var(--raise);border:1px solid var(--line);border-radius:9px;
+ padding:.6rem .8rem}
+.savebar.dirty{border-color:var(--warn)}

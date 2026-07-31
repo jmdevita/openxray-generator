@@ -1,0 +1,35 @@
+# GPU overlay for the speakers engine -- layered on top of docker-compose.yml,
+# never used alone. The immich hwaccel pattern: the default compose stays
+# GPU-free because a device reservation FAILS OUTRIGHT on hosts without the
+# NVIDIA container toolkit (there is no "optional GPU" syntax in compose), so
+# the reservation lives here and only hosts that have one opt in.
+#
+# Usage, on a host with an NVIDIA driver + nvidia-container-toolkit:
+#
+#   # in generator/.env:
+#   SPEAKERS_TORCH_INDEX=https://download.pytorch.org/whl/cu124
+#
+#   docker compose -f docker-compose.yml -f gpu.yml --profile speakers up -d --build
+#
+# The build arg swaps torch/torchaudio/torchcodec to the CUDA wheels (which
+# bundle their own CUDA runtime -- no special base image), this file grants
+# the device at runtime, and engine_speakers._load already moves the pipeline
+# to CUDA when torch sees one. Expect roughly 20-40x realtime against ~2.6x
+# on CPU: a feature film drops from ~40 minutes to ~3.
+#
+# Costs to know about: the CUDA wheels grow the image from ~1 GB to ~4-5 GB,
+# which is why CPU stays the default everywhere. And if the GPU host is a
+# DIFFERENT machine from the orchestrator, the /diarize request passes a file
+# path on the shared /timelines volume -- the two machines must share that
+# mount (NFS), or the seam needs the small change to upload audio in the
+# request body instead. Same-host GPU needs nothing extra.
+
+services:
+  engine-speakers:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

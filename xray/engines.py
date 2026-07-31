@@ -81,6 +81,125 @@ def face_transport() -> HttpFaceEngine | None:
     return HttpFaceEngine(url) if url else None
 
 
+class HttpSpeakerEngine:
+    """Service transport: the compose stack's engine-speakers container.
+
+    Diarization only -- turns plus one embedding per speaker. It never names
+    anyone: identity comes from a human, and the embeddings exist so that a
+    name given once can be carried to the next title by similarity.
+
+    No local fallback, unlike faces. pyannote means torch, and torch has no
+    business in the orchestrator image for a pass most libraries never run.
+    Without the container this pass is simply unavailable, and `ready()` says
+    so rather than failing halfway through a title.
+    """
+
+    def __init__(self, base_url: str):
+        self.base = base_url.rstrip("/")
+
+    #: What each engine state means for someone trying to run the pass. The
+    #: engine reports the state; the wording lives here because this is the
+    #: layer that knows there is a dashboard to send people to.
+    _WHY = {
+        "no-token": ("speaker diarization needs its model weights. Add a "
+                     "HuggingFace token in Setup → Speakers and the "
+                     "dashboard will fetch them (about 100 MB, once)."),
+        "needs-fetch": ("the model weights have not been downloaded yet. "
+                        "Open Setup → Speakers and choose Download."),
+        "fetching": ("the model weights are downloading now. Try again in a "
+                     "minute."),
+        "bad-token": ("HuggingFace rejected the configured token. Replace it "
+                      "in Setup → Speakers."),
+        "gated": ("the HuggingFace token works, but the pyannote conditions "
+                  "have not been accepted yet. Setup → Speakers lists the "
+                  "pages to accept."),
+        "load-failed": ("engine-speakers could not prepare its model. Setup → "
+                        "Speakers has the details."),
+    }
+
+    def ready(self) -> tuple[bool, str]:
+        j = self.model_state()
+        if not j.get("reachable", True):
+            return False, j["message"]
+        if j.get("error"):
+            return False, f"engine-speakers cannot load its model: {j['error']}"
+        state = j.get("state")
+        if state != "ready":
+            # Surfaced BEFORE a run rather than after the audio pull:
+            # discovering a missing model at minute 20 of a feature wastes
+            # exactly the expensive part.
+            return False, self._WHY.get(
+                state, f"engine-speakers is not ready ({state})")
+        return True, ""
+
+    def model_state(self) -> dict:
+        """The engine's /health, with unreachability folded in as a state.
+
+        The dashboard needs the same answer `ready()` computes but in full --
+        which gates are unaccepted, whether a token exists, where the cache is
+        -- so both go through here and neither invents its own probe.
+        """
+        import requests
+        try:
+            r = requests.get(f"{self.base}/health", timeout=5)
+            r.raise_for_status()
+            return {"reachable": True, **r.json()}
+        except Exception as e:                     # noqa: BLE001 (reported)
+            return {"reachable": False, "state": "unreachable",
+                    "message": (f"engine-speakers unreachable at {self.base} "
+                                f"({type(e).__name__}). Start it with: "
+                                f"docker compose --profile speakers up -d")}
+
+    def fetch_models(self, timeout: int = 1800) -> dict:
+        """Download the weights now. Long timeout: ~100 MB plus a load proof,
+        on whatever connection the host has."""
+        import requests
+        r = requests.post(f"{self.base}/models", timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+
+    def diarize(self, audio_path: Path, *, min_speakers: int | None = None,
+                max_speakers: int | None = None, timeout: int = 7200) -> dict:
+        """{turns, labels, embeddings} for one audio file.
+
+        The long timeout is not padding: diarization runs at roughly 3.6x
+        realtime on CPU with threading, so a feature is ~25 minutes and a
+        generous ceiling beats a spurious failure at minute 24.
+        """
+        import requests
+        body = {"audio_path": str(audio_path)}
+        if min_speakers:
+            body["min_speakers"] = min_speakers
+        if max_speakers:
+            body["max_speakers"] = max_speakers
+        r = requests.post(f"{self.base}/diarize", json=body, timeout=timeout)
+        if not r.ok:
+            # raise_for_status() reports the STATUS and drops the body, where
+            # the engine put the actual reason. A bare "500 Server Error"
+            # meant the only way to learn anything was `docker logs`, after a
+            # run that had already spent half an hour pulling audio.
+            detail = ""
+            try:
+                detail = (r.json() or {}).get("detail") or ""
+            except ValueError:
+                detail = (r.text or "").strip()[:400]
+            raise RuntimeError(
+                f"engine-speakers could not diarize ({r.status_code})"
+                + (f": {detail}" if detail else ""))
+        return r.json()
+
+
+def speaker_transport() -> HttpSpeakerEngine | None:
+    """The speakers service client when XRAY_ENGINE_SPEAKERS_URL is set.
+
+    None means the pass is unavailable, NOT that it should run locally --
+    there is no in-process diarizer by design.
+    """
+    import os
+    url = os.environ.get("XRAY_ENGINE_SPEAKERS_URL", "").strip()
+    return HttpSpeakerEngine(url) if url else None
+
+
 class AudioSegmenter:
     """Music-scene detection (inaSpeechSegmenter). Local transport: docker run.
 

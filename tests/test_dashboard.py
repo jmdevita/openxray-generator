@@ -172,9 +172,19 @@ class TestDashboardShell(unittest.TestCase):
         self.assertIn("Your spend cap", self.html)
 
     def test_music_is_separable_from_the_full_index(self):
-        # A token being present must not force paying for music.
+        # A token being present must not force paying for music. Asserted on
+        # BEHAVIOUR rather than on the source text: the old version matched
+        # the literal `'music' : ''` and broke the moment runSkip grew a
+        # second opt-in pass, without anything about music having changed.
         self.assertIn("function runSkip(", self.html)
-        self.assertIn("'music' : ''", self.html)
+        self.assertIn("MUSIC", self.html)
+        self.assertIn("push('music')", self.html)
+
+    def test_expensive_passes_never_run_unasked(self):
+        """`speakers` costs an audio pull plus ~25 min of CPU and only makes
+        sense for animation. Deepen filling every gap must not include it."""
+        self.assertIn("const OPT_IN = ['speakers']", self.html)
+        self.assertIn("'speakers'", self.html)   # still selectable as a chip
 
     def test_login_page_points_at_the_logs(self):
         self.assertIn("docker compose logs orchestrator", O.login_page())

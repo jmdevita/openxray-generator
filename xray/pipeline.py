@@ -162,12 +162,20 @@ def run_title(store: Path, *, source: MediaSource, tmdb_key: str,
         except Cancelled:
             result["steps"][name] = "cancelled"
             raise           # abandon the title; do not run its later passes
+        except index_title.Unsupported as e:
+            # Not a failure: the input is outside what the pass can do and a
+            # rerun would do the same thing. Recorded distinctly so a library
+            # containing cartoons doesn't read as a broken batch.
+            result["steps"][name] = f"skipped: {e}"
         except (SystemExit, Exception) as e:  # noqa: BLE001 (batch survives)
             result["steps"][name] = f"failed: {e}"
         finally:
             sink.close_tail()
-            if result["steps"].get(name, "").startswith("failed"):
-                log(f"  [{name}] FAILED: {result['steps'][name]}")
+            state = result["steps"].get(name, "")
+            if state.startswith("failed"):
+                log(f"  [{name}] FAILED: {state}")
+            elif state.startswith("skipped: "):
+                log(f"  [{name}] skipped: {state[len('skipped: '):]}")
 
     if not cid:
         # No content identity means nothing can be indexed or fetched; stop
@@ -236,6 +244,22 @@ def run_title(store: Path, *, source: MediaSource, tmdb_key: str,
             step("index", lambda: index_title.run(
                 store, store / "index_work", source=source,
                 tmdb_key=tmdb_key, rating_key=rating_key))
+
+    # Speakers: diarization for animated titles, where faces cannot work.
+    #
+    # OPT-IN ONLY. It is not in the default skip set by accident -- it costs an
+    # audio pull plus ~25 minutes of CPU per feature, and on live action it
+    # would duplicate work faces already did better. The dashboard offers it
+    # as a chip on animated rows; nothing runs it unasked.
+    #
+    # It also does not finish: it stores clusters and stops, because naming a
+    # speaker needs a person. `needsLabelling` in the result is what the
+    # dashboard turns into "16 speakers, none named".
+    if "speakers" not in skip:
+        from .passes import speakers as speakers_pass
+        step("speakers", lambda: speakers_pass.run(
+            store, store / "speakers_work", source=source,
+            tmdb_key=tmdb_key, rating_key=rating_key))
 
     from .passes import people as people_pass
     from .passes import trivia as trivia_pass

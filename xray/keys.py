@@ -34,6 +34,17 @@ def audd_token() -> str:
     return _read(".auddtoken", "AUDD_API_TOKEN", "audd_token")
 
 
+def hf_token() -> str:
+    """HuggingFace token, used ONLY to fetch the gated pyannote weights.
+
+    Lower-value than the others in this module and needed for less time: it
+    downloads openly-licensed models that sit behind an accept-the-conditions
+    gate, and it stops being needed once the weights are cached. An image
+    built with the weights baked in never needs one at all.
+    """
+    return _read(".hftoken", "HF_TOKEN", "hf_token")
+
+
 def jellyfin_token() -> str:
     return _read(".jellyfintoken", "JELLYFIN_TOKEN", "jellyfin_token")
 

@@ -6,9 +6,15 @@
 #   cd generator && docker compose up -d
 #   open http://localhost:8080
 #
-# Secrets: put keys in generator/.env (gitignored):
+# Secrets: put keys in generator/.env (gitignored). Compose reads that file
+# automatically, so every variable below is picked up by `docker compose` with
+# nothing on the command line:
 #   PLEX_ORIGIN=https://plex.example.com
 #   PLEX_TOKEN=...   TMDB_KEY=...   AUDD_API_TOKEN=...
+#   HF_TOKEN=hf_...      # optional: only for the speakers profile. Present, it
+#                        # bakes the diarization weights into the image at build
+#                        # time; absent, the dashboard fetches them on request
+#                        # (Setup → Speakers) and the build still succeeds.
 #   XRAY_WEB_TOKEN=...   # optional: pin the dashboard token instead of the
 #                        # generated one (env overrides always; rotation = edit + restart)
 
@@ -36,6 +42,10 @@ services:
       AUDD_API_TOKEN: ${AUDD_API_TOKEN:-}
       XRAY_STORE: /timelines
       XRAY_ENGINE_AUDIO_URL: http://engine-audio:8082
+      # Speaker diarization for animated titles, where faces cannot work.
+      # Only reachable when the container is up:
+      #   docker compose --profile speakers up -d --build
+      XRAY_ENGINE_SPEAKERS_URL: http://engine-speakers:8083
       # uncomment to run face work in the engine-faces container instead of
       # in-process (the GPU/scale-out swap point):
       # XRAY_ENGINE_FACES_URL: http://engine-faces:8081
@@ -60,6 +70,51 @@ services:
     build: { context: .., dockerfile: generator/engine-audio.Dockerfile }
     volumes:
       - timelines:/timelines
+
+  engine-speakers:
+    container_name: openxray-engine-speakers
+    build:
+      context: ..
+      dockerfile: generator/engine-speakers.Dockerfile
+      # OPTIONAL. With HF_TOKEN set in the environment the gated pyannote
+      # weights are baked into the image as a BuildKit secret (never a layer,
+      # never image history), giving a container that reaches nothing at
+      # runtime. Without it the build still succeeds and the weights are
+      # fetched later from Setup → Speakers in the dashboard, which is the
+      # path that can say WHICH of the three gates is unaccepted.
+      secrets: [hf_token]
+      args:
+        # CPU torch by default; a CUDA host sets SPEAKERS_TORCH_INDEX in .env
+        # (e.g. https://download.pytorch.org/whl/cu124) and layers gpu.yml on
+        # top for the runtime device reservation. See gpu.yml.
+        TORCH_INDEX: ${SPEAKERS_TORCH_INDEX:-https://download.pytorch.org/whl/cpu}
+    # OPT-IN. torch is ~200 MB even CPU-only and most libraries are live
+    # action, where this never runs, so a default `up` must not pull it:
+    #   docker compose --profile speakers up -d
+    profiles: ["speakers"]
+    environment:
+      # torch defaults to a single thread in a container: measured 1.2x
+      # realtime against 3.6x threaded, a 3x difference for one setting.
+      XRAY_VOICE_THREADS: ${XRAY_VOICE_THREADS:-8}
+      # Reads the HuggingFace token out of settings.json on the shared volume,
+      # the same file every other credential lives in. Nothing is pushed to
+      # this container: an engine that reads the file needs no re-push after a
+      # restart, and the token never crosses the wire between containers.
+      XRAY_STORE: /timelines
+      # Only a fallback, for a stack whose settings.json predates this key
+      # (env vars seed settings on FIRST boot only). The dashboard is the
+      # normal way in.
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - timelines:/timelines
+
+secrets:
+  # Build-time only, and optional. To bake the weights in, accept the gates on
+  # speaker-diarization-3.1, segmentation-3.0 and speaker-diarization-
+  # community-1, then:
+  #   HF_TOKEN=hf_... docker compose --profile speakers build
+  hf_token:
+    environment: HF_TOKEN
 
 volumes:
   timelines:

@@ -52,6 +52,107 @@ def _progress_ms(line: str) -> int | None:
     return None
 
 
+#: HTTP input options, and they belong BEFORE -i (they configure the protocol,
+#: not the output). Without these, ffmpeg treats a media server closing the
+#: connection mid-file as end-of-stream: it exits 0 with a partial file and
+#: nothing looks wrong. Measured against a remote Plex origin, a 2 GB pull died
+#: at 67% after half an hour, and the only evidence was the output duration.
+#:
+#: `-reconnect_streamed` is the one that matters here -- a Plex part URL is not
+#: seekable to ffmpeg, and the plain `-reconnect` does not cover that case.
+_HTTP_RETRY = ["-reconnect", "1", "-reconnect_streamed", "1",
+               "-reconnect_on_network_error", "1",
+               "-reconnect_delay_max", "10"]
+
+
+def _input_opts(video_path) -> list[str]:
+    """Retry options, but only for a network input: passing them for a local
+    file makes ffmpeg warn about unused options on every single call."""
+    return _HTTP_RETRY if str(video_path).startswith(("http://", "https://")) \
+        else []
+
+
+def extract_audio(video_path, audio_out, *, on_progress=None,
+                  duration_ms=None) -> Path:
+    """Pull ONLY the audio track. No video decode at all.
+
+    The speakers pass needs audio and nothing else, so `-vn` before the input
+    map means ffmpeg never touches a video frame. That makes this strictly
+    cheaper than extract_frames' combined pull, not an extra cost: the same
+    media crosses the wire, minus the decoding.
+
+    Mono 16 kHz because that is what the diarizer wants; feeding it 44.1 kHz
+    stereo just makes it downmix on the other side. WAV rather than MP3 to
+    skip an encode/decode round trip whose artefacts land in the embeddings.
+    """
+    import subprocess
+    audio_out = Path(audio_out)
+    audio_out.parent.mkdir(parents=True, exist_ok=True)
+    cmd = (["ffmpeg", "-nostdin", "-y"] + _input_opts(video_path)
+           + ["-i", str(video_path),
+              "-vn", "-map", "0:a:0", "-ac", "1", "-ar", "16000",
+              "-c:a", "pcm_s16le", str(audio_out)])
+    if on_progress and duration_ms:
+        # Same deadlock guard as extract_frames: without -nostats the
+        # per-frame chatter fills stderr while we read stdout and both block.
+        cmd = cmd[:1] + ["-nostats", "-loglevel", "error",
+                         "-progress", "pipe:1"] + cmd[1:]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+        for line in proc.stdout:
+            ms = _progress_ms(line)
+            if ms is not None:
+                on_progress(min(ms, duration_ms), duration_ms)
+        proc.wait()
+        if proc.returncode:
+            raise RuntimeError(
+                f"ffmpeg audio extract failed: {proc.stderr.read()[-400:]}")
+    else:
+        cp = subprocess.run(cmd, capture_output=True, text=True)
+        if cp.returncode:
+            raise RuntimeError(
+                f"ffmpeg audio extract failed: {cp.stderr[-400:]}")
+    if duration_ms:
+        _check_full_length(audio_out, duration_ms)
+    return audio_out
+
+
+#: How much shorter than the expected runtime an extract may be before it is
+#: treated as truncated. Container audio and video streams legitimately differ
+#: by a second or two, and a trailing-silence trim is normal; a tenth of a film
+#: is not.
+_SHORT_AUDIO_TOLERANCE = 0.02
+
+
+def _check_full_length(audio_out: Path, duration_ms: int) -> None:
+    """Fail loudly when the pull came back short.
+
+    A zero exit from ffmpeg is NOT proof the whole track arrived: on an HTTP
+    input that closes early it treats the truncation as end-of-stream and exits
+    0 with a partial file. Silence there is the worst outcome available -- the
+    intervals that got written would all be correct, so nothing downstream
+    could tell that the last third of the film was never examined, and the
+    timeline would be published as complete.
+
+    Free to check: the header of a PCM WAV carries the frame count.
+    """
+    import wave
+    try:
+        with wave.open(str(audio_out), "rb") as w:
+            got_s = w.getnframes() / float(w.getframerate() or 1)
+    except (wave.Error, OSError, EOFError, ZeroDivisionError):
+        return                      # not a WAV we can measure; nothing to say
+    want_s = duration_ms / 1000.0
+    if got_s >= want_s * (1 - _SHORT_AUDIO_TOLERANCE):
+        return
+    raise RuntimeError(
+        f"audio extract is short: got {got_s/60:.1f} min of a "
+        f"{want_s/60:.1f} min title ({100*got_s/want_s:.0f}%). ffmpeg exited "
+        f"cleanly, which on an HTTP source usually means the connection "
+        f"closed early -- diarizing this would silently cover only part of "
+        f"the title. Re-run to retry the pull.")
+
+
 def extract_frames(video_path, out_dir, sample_fps=1.0, max_height=720,
                    quality=3, start_s=0.0, duration_s=None,
                    audio_out=None, on_progress=None,
@@ -81,7 +182,7 @@ def extract_frames(video_path, out_dir, sample_fps=1.0, max_height=720,
 
     vf = (f"fps={sample_fps},"
           f"scale=w=1280:h={max_height}:force_original_aspect_ratio=decrease")
-    cmd = ["ffmpeg", "-nostdin", "-y"]
+    cmd = ["ffmpeg", "-nostdin", "-y"] + _input_opts(video_path)
     if start_s:
         cmd += ["-ss", str(start_s)]          # input seek (before -i) = fast
         audio_out = None                       # offset audio would lie about time
