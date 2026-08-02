@@ -221,9 +221,29 @@ button.namebtn:hover .n{background:var(--paper);color:var(--warn)}
 .infodot:hover::after,.infodot:focus::after{opacity:1;visibility:visible}
 
 /* labelling.js still uses these for its inline notes (unsaved / recognised) */
+/* The offer to carry names across a series. Sits between the rows and the
+   save bar, where the person still is, and only after a save has given it
+   something to carry. */
+.notice{margin-top:1rem;padding:.7rem .9rem;border-radius:8px;
+ background:var(--wash);border:1px solid var(--accent);font-size:13px;
+ gap:.8rem}
 .spknote{font:11.5px var(--mono);margin-left:.45rem;white-space:nowrap}
 .spknote.ok{color:var(--ok)}
 .spknote.owed{color:var(--warn)}
+/* A strength note says "good match", not a number. The cosine is a hover
+   away for anyone who wants it -- same instant CSS tooltip as .infodot,
+   since a native title= never wins the hover race against a repainting
+   table, and tabindex makes a CLICK show it too. */
+.spknote[data-tip]{cursor:help;position:relative;outline:none;
+ border-bottom:1px dotted currentColor}
+.spknote[data-tip]::after{content:attr(data-tip);position:absolute;
+ top:calc(100% + 7px);left:-.6rem;width:15rem;max-width:70vw;z-index:9;
+ background:var(--raise);color:var(--ink);border:1px solid var(--line);
+ border-radius:8px;padding:.5rem .7rem;box-shadow:0 10px 28px rgba(0,0,0,.35);
+ font:400 12px/1.5 ui-sans-serif,system-ui,sans-serif;white-space:normal;
+ opacity:0;visibility:hidden;transition:opacity .12s;pointer-events:none}
+.spknote[data-tip]:hover::after,.spknote[data-tip]:focus::after{
+ opacity:1;visibility:visible}
 
 /* The Speakers setup step's body. Its own class because the content includes a
    list and a button row, so it cannot be a <p> and pick up p.sub. */
@@ -260,6 +280,14 @@ button.namebtn:hover .n{background:var(--paper);color:var(--warn)}
  border-radius:1px}
 .labrow.named .strip i{background:var(--accent)}
 .chip.sug{border-style:dashed}
+/* Three faces side by side, from across the cluster's life -- wide enough
+   that a cluster which merged two people is obvious rather than subtle. The
+   fixed height keeps rows aligned while the montages load. */
+.labcrop{flex:0 0 138px;width:138px;height:46px;object-fit:cover;
+ border-radius:6px;background:var(--soft);border:1px solid var(--line)}
+/* A machine's guess, not a person's word: dashed like a suggestion, but
+   filled, because unlike a suggestion it is ALREADY in the timeline. */
+.chip.auto{border-style:dashed;background:var(--soft)}
 .tiny{font-size:11.5px}
 .bar{height:5px;background:var(--soft);border-radius:3px;overflow:hidden;
  margin:.5rem 0 1rem}

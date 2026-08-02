@@ -4,19 +4,16 @@ Free and deterministic, no LLM, no paid API (plan.md §2 ledger, §6.3; research
 doc §7 v1). Resolution chain: TMDb external_ids → Wikidata entity → English
 Wikipedia article. Emits schema `trivia` items with startMs/endMs = null
 (title-level, not scene-pinned; timed trivia is a stretch goal).
-
-Wikimedia APIs REQUIRE a descriptive User-Agent or they reject the request.
 """
 from __future__ import annotations
 
 import re
 
-import requests
+from . import wikimedia
 
 TMDB = "https://api.themoviedb.org/3"
 WD_API = "https://www.wikidata.org/w/api.php"
 WP_API = "https://en.wikipedia.org/w/api.php"
-UA = {"User-Agent": "plex-xray/0.1 (github.com/plex-xray) trivia"}
 
 # Wikidata property → (sentence template, is the value an entity to label-resolve)
 WD_PROPS = {
@@ -46,9 +43,7 @@ _ADMIN = re.compile(
 
 
 def _session():
-    s = requests.Session()
-    s.headers.update(UA)
-    return s
+    return wikimedia.session("trivia")
 
 
 def _join(names):

@@ -40,8 +40,8 @@ from pydantic import BaseModel
 
 from .. import engines
 from .. import keys as k
-from .. import voiceprints as vpmod
-from .. import pipeline, settings_store as ss, store as st
+from .. import faceprints as fpmod, voiceprints as vpmod
+from .. import pipeline, prints, settings_store as ss, store as st
 from ..budget import AuddBudget
 from .. import progress
 from . import media_auth as ma
@@ -366,6 +366,40 @@ def _speaker_state(doc: dict) -> dict | None:
             "pct": round(100 * covered / total) if total else 0}
 
 
+def _face_state(doc: dict) -> dict | None:
+    """{found, nameable, named, pct} for an indexed title, None without one.
+
+    Same shape as the speaker state so the Store row can render either, but
+    `named` means something slightly different: a face cluster can be settled
+    either because a person named it or because it matched a cast photo, and
+    both are equally "done" from the screen's point of view. `pct` is the
+    share of on-screen time settled, not a count of clusters, for the same
+    reason it is for voices -- the leads carry most of the runtime.
+    """
+    cid = doc.get("contentId")
+    if not cid:
+        return None
+    clusters = fpmod.read_clusters(STORE, cid)
+    if not clusters:
+        return None
+    rows = [c for c in clusters.get("clusters") or [] if c.get("nameable")]
+    if not rows:
+        return None
+    named = _named_faces(STORE, cid)
+
+    def settled(c):
+        m = c.get("matched")
+        return (str(c["cluster"]) in named
+                or bool(m and m.get("sim", 0) >= fpmod.MATCH_THRESHOLD))
+
+    total = sum(c.get("screenSeconds") or 0 for c in rows)
+    covered = sum(c.get("screenSeconds") or 0 for c in rows if settled(c))
+    return {"found": len(clusters.get("clusters") or []),
+            "nameable": len(rows),
+            "named": sum(1 for c in rows if settled(c)),
+            "pct": round(100 * covered / total) if total else 0}
+
+
 def _inventory() -> list[dict]:
     out = []
     manifest = st.load_manifest(STORE)
@@ -388,6 +422,7 @@ def _inventory() -> list[dict]:
             # person. The row has to be able to say "16 speakers, none named",
             # which no other block ever needs to express.
             "speakerState": _speaker_state(doc),
+            "faceState": _face_state(doc),
             "lookup": rev.get(f.name, []),
             "intervals": len(doc.get("actorIntervals") or []),
             "songs": len(doc.get("musicIntervals") or []),
@@ -849,8 +884,12 @@ def api_speakers(content_id: str):
                "assigned": assigned, "suggest": None,
                "spans": _spans(clusters["turns"], spk, runtime_s)}
         if not assigned and s["matchable"] and s.get("embedding"):
-            row["suggest"] = vpmod.suggest(STORE, s["embedding"],
-                                           exclude_content=content_id)
+            hit = vpmod.suggest(STORE, s["embedding"],
+                                exclude_content=content_id)
+            if hit:
+                hit["confidence"] = vpmod.confidence(hit["sim"])
+                hit["explain"] = vpmod.explain(hit["sim"])
+            row["suggest"] = hit
         rows.append(row)
     rows.sort(key=lambda r: -r["seconds"])
     return {"contentId": content_id,
@@ -1005,6 +1044,202 @@ def _rebuild_intervals(content_id: str, clusters: dict, names: dict) -> int:
                                    key=lambda iv: iv.get("startMs") or 0)
     doc.setdefault("provenance", {})["speakers"] = {
         "generated": st.now_iso(), "version": "pyannote-3.1 + human"}
+    st.write_timeline(path, doc)
+    return len(fresh)
+
+
+# --- labelling: faces ----------------------------------------------------
+#
+# Same screen, different sense. Where diarization leaves every speaker
+# anonymous, the face pass NAMES the clusters it can and leaves the rest --
+# so these rows come in three states, not two: matched against a cast photo,
+# suggested from a faceprint learned on another title, or unknown. Matched
+# rows are shown too, and are confirmable: a match at the old default put 122
+# seconds of one actor's screen time under another actor's name, and only a
+# person looking at the face can catch that.
+
+
+class FaceNameRequest(BaseModel):
+    cluster: int
+    actor_id: str | None = None
+    character: str | None = None
+    sim: float | None = None
+
+
+def _face_names_path(store, content_id: str) -> Path:
+    return Path(store) / fpmod.FACE.name / f"{content_id}.names.json"
+
+
+def _named_faces(store, content_id: str) -> dict:
+    return prints.read_json(_face_names_path(store, content_id), {}) or {}
+
+
+@app.get("/api/faces/{content_id}")
+def api_faces(content_id: str):
+    """Face clusters for one title, ranked by screen time.
+
+    Below-floor clusters are counted, never listed: on a 59-minute episode
+    they were an out-of-focus background face, a cluster that had merged
+    three people, and a lamp.
+    """
+    clusters = fpmod.read_clusters(STORE, content_id)
+    if not clusters:
+        raise HTTPException(404, "no face clusters for this title; re-index it")
+    path = st.canonical_path(STORE, content_id)
+    doc = json.loads(path.read_text()) if path.exists() else {}
+    named = _named_faces(STORE, content_id)
+    cast_by_id = {c["actorId"]: c for c in doc.get("cast") or []}
+
+    rows, below = [], 0
+    for c in clusters["clusters"]:
+        if not c["nameable"]:
+            below += 1
+            continue
+        key = str(c["cluster"])
+        auto = c.get("matched")
+        if auto and auto["sim"] < fpmod.MATCH_THRESHOLD:
+            auto = None          # under the calibrated bar: not a claim
+        row = {
+            "cluster": c["cluster"], "seconds": c["screenSeconds"],
+            "scenes": c["scenes"], "spans": c["spans"],
+            "assigned": named.get(key),
+            "matched": (dict(auto, character=(
+                cast_by_id.get(auto["actorId"], {}).get("character")
+                or cast_by_id.get(auto["actorId"], {}).get("name")
+                or auto["actorId"]),
+                confidence=fpmod.confidence(auto["sim"]),
+                explain=fpmod.explain(auto["sim"], auto.get("via") or ""))
+                if auto else None),
+            "suggest": None,
+        }
+        if not row["assigned"] and not auto and c.get("embedding"):
+            hit = fpmod.suggest(STORE, c["embedding"],
+                                exclude_content=content_id)
+            if hit:
+                hit["confidence"] = fpmod.confidence(hit["sim"])
+                hit["explain"] = fpmod.explain(hit["sim"], "faceprint")
+            row["suggest"] = hit
+        rows.append(row)
+    rows.sort(key=lambda r: -r["seconds"])
+    return {"contentId": content_id, "title": doc.get("title"),
+            "runtime": (doc.get("sourceRuntimeMs") or 0) / 1000,
+            "screenSeconds": round(sum(r["seconds"] for r in rows), 1),
+            "cast": doc.get("cast") or [], "rows": rows,
+            "belowFloor": below, "minSeconds": fpmod.MIN_SCREEN_S,
+            "minScenes": fpmod.MIN_SCENES}
+
+
+@app.get("/api/faces/{content_id}/crop/{cluster}")
+def api_face_crop(content_id: str, cluster: int):
+    """The cluster's exemplar montage: three faces from across its life.
+
+    Cut during the pass, because the frames they come from do not outlive it.
+    """
+    crop = fpmod.crops_dir(STORE, content_id) / f"{cluster}.jpg"
+    if not crop.exists():
+        raise HTTPException(404, "no crop for that cluster; re-index the title")
+    return FileResponse(crop, media_type="image/jpeg")
+
+
+@app.post("/api/faces/{content_id}/name")
+def api_name_face(content_id: str, req: FaceNameRequest):
+    """Assign (or clear) one cluster, then rewrite the title's face intervals."""
+    clusters = fpmod.read_clusters(STORE, content_id)
+    if not clusters:
+        raise HTTPException(404, "no face clusters for this title")
+    by_id = {c["cluster"]: c for c in clusters["clusters"]}
+    if req.cluster not in by_id:
+        raise HTTPException(404, f"no cluster {req.cluster} in this title")
+
+    names = _named_faces(STORE, content_id)
+    key = str(req.cluster)
+    if req.actor_id and req.character:
+        names[key] = {"actorId": req.actor_id, "character": req.character,
+                      "sim": req.sim}
+        cluster = by_id[req.cluster]
+        # Enrol only above the floor: a thin reference is not dangerous on
+        # its own, but it would be reused on every later title.
+        if cluster["nameable"] and cluster.get("embedding"):
+            fpmod.enroll(STORE, req.actor_id, actor_id=req.actor_id,
+                         character=req.character,
+                         embedding=cluster["embedding"],
+                         content_id=content_id)
+    else:
+        names.pop(key, None)
+
+    prints.write_json(_face_names_path(STORE, content_id), names)
+    written = _rebuild_face_intervals(content_id, clusters, names)
+    return {"ok": True, "named": len(names), "intervals": written,
+            # What propagating would reach, so the screen can offer it with a
+            # real number instead of a vague "apply elsewhere?"
+            "siblings": len(fpmod.siblings(STORE, content_id))}
+
+
+@app.post("/api/faces/{content_id}/propagate")
+def api_propagate_faces(content_id: str):
+    """Carry this title's names across the rest of its series.
+
+    Cheap enough to be a button: cluster centroids are already on disk, so
+    this is arithmetic, not a re-index. Nothing is fetched and no frame is
+    decoded, which is why a season finishes while you watch.
+    """
+    if not fpmod.series_key(content_id):
+        raise HTTPException(422, "only episodes propagate; a film has no "
+                                 "siblings to carry names to")
+    changed = fpmod.propagate(STORE, content_id)
+    episodes = 0
+    for cid, _hits in changed.items():
+        clusters = fpmod.read_clusters(STORE, cid)
+        if clusters:
+            _rebuild_face_intervals(cid, clusters, _named_faces(STORE, cid))
+            episodes += 1
+    return {"ok": True, "episodes": episodes,
+            "named": sum(changed.values()),
+            "detail": changed}
+
+
+def _rebuild_face_intervals(content_id: str, clusters: dict,
+                            names: dict) -> int:
+    """Clusters + names -> the title's face intervals, from scratch.
+
+    Both halves are regenerated -- the automatic matches AND the human ones --
+    because the cluster document is the source of truth for what is on
+    screen, and rebuilding is the only way a CLEARED name actually loses its
+    intervals. It also means the calibrated threshold applies to timelines
+    indexed before it existed: a match too weak to believe stops being
+    claimed the moment anyone opens the screen.
+    """
+    path = st.canonical_path(STORE, content_id)
+    doc = json.loads(path.read_text())
+    kept = [iv for iv in (doc.get("actorIntervals") or [])
+            if (iv.get("source") or "face") != "face"]
+    runtime_ms = clusters.get("runtimeMs") or doc.get("sourceRuntimeMs") or 0
+
+    fresh = []
+    for c in clusters["clusters"]:
+        human = names.get(str(c["cluster"]))
+        auto = c.get("matched")
+        if human:
+            actor_id = human["actorId"]
+            # A person looking at the face is stronger evidence than any
+            # cosine, so a name given by eye is 1.0; an accepted suggestion
+            # keeps the score that earned it.
+            conf = round(float(human["sim"]), 3) if human.get("sim") else 1.0
+        elif auto and auto["sim"] >= fpmod.MATCH_THRESHOLD:
+            actor_id, conf = auto["actorId"], auto["sim"]
+        else:
+            continue
+        for start, width in c["spans"]:
+            fresh.append({"actorId": actor_id,
+                          "startMs": int(start * runtime_ms),
+                          "endMs": int((start + width) * runtime_ms),
+                          "confidence": conf, "source": "face"})
+
+    doc["actorIntervals"] = sorted(kept + fresh,
+                                   key=lambda iv: iv.get("startMs") or 0)
+    doc.setdefault("provenance", {})["faces"] = {
+        "generated": st.now_iso(),
+        "version": f"{clusters.get('version') or 'sface-v1'} + human"}
     st.write_timeline(path, doc)
     return len(fresh)
 

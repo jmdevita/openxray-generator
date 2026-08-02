@@ -373,3 +373,52 @@ class TestSearchSurfacesShows(unittest.TestCase):
         show_branch = js.split("if(x.type === 'show'){", 1)[1].split(" }", 1)[0]
         self.assertIn("data-act=\"series\"", show_branch)
         self.assertNotIn("data-act=\"queue\"", show_branch)
+
+
+class TestTheCliLogChannelDoesNotEatItself(unittest.TestCase):
+    """`log` defaults to print, and step() runs each pass with stdout
+    redirected into a sink that calls back into log. Without care that
+    recursed on the first line a pass emitted: every CLI run of every title
+    died with "maximum recursion depth exceeded", while the dashboard was
+    unaffected because the orchestrator supplies a log that appends to a job
+    record instead of printing."""
+
+    def setUp(self):
+        self.store = Path(tempfile.mkdtemp())
+
+    def _run(self, pass_body, **kw):
+        import contextlib
+        import io as _io
+        buf = _io.StringIO()
+        with mock.patch("xray.passes.index_title.run",
+                        side_effect=pass_body), \
+                contextlib.redirect_stdout(buf):
+            pipeline.run_title(self.store, source=FakeSource(), tmdb_key="",
+                               audd_token="", rating_key="rk1",
+                               skip={"people", "trivia", "music", "speakers"},
+                               hub_url="", **kw)
+        return buf.getvalue()
+
+    def test_a_printing_pass_reaches_the_terminal(self):
+        out = self._run(lambda *a, **k: print("noisy pass line"))
+        self.assertIn("noisy pass line", out)
+        self.assertIn("[index]", out)
+
+    def test_a_progress_callback_may_print_as_well(self):
+        seen = []
+
+        def body(*a, **k):
+            print("[progress] phase=faces done=1 total=2")
+
+        def watcher(ev):
+            # A title event arrives before any pass runs; only the marker
+            # ones carry a phase.
+            print("watcher saw " + str(ev.get("phase") or ev.get("title")))
+            seen.append(ev)
+
+        out = self._run(body, progress=watcher)
+        self.assertEqual([e.get("phase") for e in seen if "phase" in e],
+                         ["faces"])
+        self.assertIn("watcher saw faces", out)
+        # progress markers are not ALSO logged as text
+        self.assertNotIn("[index] [progress]", out)

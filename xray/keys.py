@@ -54,6 +54,34 @@ def jellyfin_user() -> str:
     return _read(".jellyfinuser", "JELLYFIN_USER", "jellyfin_user")
 
 
+#: Where reference photos come from. Not offered in the setup UI: `tmdb`
+#: exists so the choice is reversible in one env var, not so it is browsed.
+ENROLLMENT_SOURCES = ("commons", "tmdb")
+
+
+def enrollment_source() -> str:
+    """Which photos build the face REFERENCE embeddings. Commons by default.
+
+    TMDb's API terms §1.C bar using TMDb Content "in connection with … a
+    machine learning (ML) or artificial intelligence (AI) based Application",
+    and enrollment is exactly that use. Wikimedia Commons photos carry their
+    own free licences and no such clause, so they are the default while
+    written permission is outstanding.
+
+    Only ENROLLMENT moves. Cast lists, character names, and the `thumb` URLs
+    the timeline displays still come from TMDb -- ordinary metadata use,
+    which the terms permit with attribution -- so the data contract is
+    untouched and actorIds still read `tmdb:380`.
+
+    Set XRAY_ENROLLMENT_SOURCE=tmdb to go back: it enrolls better (several
+    photos per actor against usually one, and ~90% of top-billed cast against
+    ~100%), and it becomes the sensible default the day TMDb says yes.
+    """
+    v = _read(".enrollmentsource", "XRAY_ENROLLMENT_SOURCE",
+              "enrollment_source").strip().lower()
+    return v if v in ENROLLMENT_SOURCES else "commons"
+
+
 def backend_token(backend: str) -> str:
     """The auth token for whichever backend is selected."""
     return jellyfin_token() if (backend or "").lower() == "jellyfin" else plex_token()

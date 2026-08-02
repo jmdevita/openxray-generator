@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import sys
 from pathlib import Path
 
 from . import progress as pg, store as st
@@ -139,6 +140,14 @@ def run_title(store: Path, *, source: MediaSource, tmdb_key: str,
             result["steps"][name] = "skipped(flag)"
             return
 
+        # The stream to report ON, captured before anything is redirected TO
+        # the sink. `log` defaults to print, so without this the first line a
+        # pass emits is written to the sink, which calls this handler, which
+        # logs, which writes to the sink... The CLI died on every title that
+        # way while the dashboard was fine, because the orchestrator passes a
+        # log of its own that appends to a job record instead of printing.
+        outer = sys.stdout
+
         def handle(line):
             # Progress markers leave the log channel here: a feature-length
             # face pass emits ~50 of them, and the log is for humans. With no
@@ -150,9 +159,11 @@ def run_title(store: Path, *, source: MediaSource, tmdb_key: str,
                     # May raise Cancelled; that propagates out through print()
                     # and aborts the pass mid-frame, which is the only way to
                     # stop a title that is minutes into its face loop.
-                    progress({"pass": name, **event})
+                    with contextlib.redirect_stdout(outer):
+                        progress({"pass": name, **event})
                 return
-            log(f"  [{name}] {line}")
+            with contextlib.redirect_stdout(outer):
+                log(f"  [{name}] {line}")
 
         sink = _LineSink(handle)
         try:

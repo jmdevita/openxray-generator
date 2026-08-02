@@ -13,13 +13,19 @@ import cv2
 import numpy as np
 import requests
 
+from .sources import wikimedia
+
 TMDB = "https://api.themoviedb.org/3"
+
+#: One Session for every reference photo: identifies us to Wikimedia (which
+#: rejects anonymous clients), waits out the 429s Commons sends under a burst
+#: of downloads, and reuses connections. TMDb ignores all three, so its path
+#: is unaffected.
+_PHOTOS = wikimedia.session("refs")
 
 
 def _fetch_bytes(url, timeout=20):
-    r = requests.get(url, timeout=timeout)
-    r.raise_for_status()
-    return r.content
+    return wikimedia.get(_PHOTOS, url, timeout=timeout).content
 
 
 # --- cast sources ---------------------------------------------------------
@@ -204,6 +210,24 @@ def cast_from_tmdb_tv(tv_id, api_key, season=1, episode=1, max_images=5,
 
 # --- reference embeddings -------------------------------------------------
 
+#: A reference photo whose second face is at least this fraction of the
+#: largest face's area is AMBIGUOUS and gets skipped: a co-portrait (Commons
+#: P18 photos are sometimes "actor with partner/castmate") would otherwise
+#: silently enroll the wrong person. Background faces in a group shot are
+#: much smaller and still pass.
+AMBIGUOUS_FACE_RATIO = 0.5
+
+
+def _dominant(faces, area):
+    """The clearly-largest face by `area(face)`, or None when ambiguous."""
+    if not faces:
+        return None
+    by_area = sorted(faces, key=area, reverse=True)
+    if len(by_area) > 1 and area(by_area[1]) >= AMBIGUOUS_FACE_RATIO * area(by_area[0]):
+        return None
+    return by_area[0]
+
+
 def _collect_reference_embeddings(cast, vec_for_image, max_actors, log,
                                   fetch=None):
     """Shared enrollment loop for both transports: download each member's
@@ -243,11 +267,9 @@ def build_reference_embeddings(cast, embedder, max_actors=None, log=print):
         img = cv2.imdecode(np.frombuffer(content, dtype=np.uint8), cv2.IMREAD_COLOR)
         if img is None:
             return None
-        dets = embedder.detect(img)
-        if not dets:
-            return None
-        best = max(dets, key=lambda d: d.bbox[2] * d.bbox[3])
-        return embedder.embed(img, best)
+        best = _dominant(embedder.detect(img),
+                         lambda d: d.bbox[2] * d.bbox[3])
+        return embedder.embed(img, best) if best is not None else None
 
     return _collect_reference_embeddings(cast, vec_for_image, max_actors, log)
 
@@ -266,10 +288,10 @@ def build_reference_embeddings_http(cast, transport, spool_dir,
 
     def vec_for_image(content):
         spool.write_bytes(content)
-        faces = transport.embed_image_file(spool)
-        if not faces:
+        best = _dominant(transport.embed_image_file(spool),
+                         lambda f: f["bbox"][2] * f["bbox"][3])
+        if best is None:
             return None
-        best = max(faces, key=lambda f: f["bbox"][2] * f["bbox"][3])
         return np.asarray(best["embedding"], dtype=np.float32)
 
     try:

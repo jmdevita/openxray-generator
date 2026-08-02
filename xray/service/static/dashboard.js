@@ -17,7 +17,7 @@ document.addEventListener('click', ev => {
  if(d.act === 'pick')   return togglePick(d.cid, d.pass);
  if(d.act === 'deepen') return deepenRow(d.rk, d.cid, d.label);
  if(d.act === 'log')    return showLog(+d.id);
- if(d.act === 'label')  return openLabelling(d.cid);
+ if(d.act === 'label')  return openLabelling(d.cid, d.kind);
  // Repaint straight away rather than waiting for the next poll: a fold that
  // takes two seconds to respond reads as a dead control.
  if(d.act === 'toglog') { logOpen = !logOpen; return poll(); }
@@ -771,8 +771,10 @@ async function loadStore(){
    // Never gated: naming clusters a previous run found is orchestrator work on
    // stored data, so it keeps working with the container stopped.
    + speakerNote(t)
+   + faceNote(t)
    + '</div></td><td class="acts">'
    + speakerAction(t)
+   + faceAction(t)
    // Offered whenever anything is missing, not just faces: with a selection
    // it runs exactly what is ticked, and with none it fills every gap.
    + ((rk && (!t.blocks.faces || !t.blocks.music || !t.blocks.people
@@ -881,6 +883,37 @@ function speakerAction(t){
  return '<button class="namebtn" data-act="label" data-cid="'
   + esc(t.contentId) + '" title="Play each speaker and pick who it is">'
   + 'Name speakers<span class="n">' + (s.nameable - s.named)
+  + '</span></button> ';
+}
+
+
+//: The face equivalent of SPK_WHY. Different reason, same shape of answer:
+//: why does an INDEXED title still want a person? Because the reference
+//: photos are the thin part, not the video.
+const FACE_WHY = 'Some cast have no freely-licensed photo, so the pass '
+ + 'cannot name them however clearly they appear. Name a face and their '
+ + 'scenes fill in; names carry to other titles with the same cast.';
+
+function faceNote(t){
+ const s = t.faceState;
+ if(!s || !s.nameable) return '';
+ const info = '<span class="infodot" tabindex="0" data-tip="' + FACE_WHY
+  + '">i</span>';
+ const bar = '<span class="mini"><i style="width:' + (s.pct || 0)
+  + '%"></i></span>';
+ const done = s.named >= s.nameable;
+ return '<span class="spkstate' + (done ? ' ok' : ' owed') + '">faces' + bar
+  + (s.pct || 0) + '% named · ' + s.named + '/' + s.nameable + info
+  + '</span>';
+}
+
+function faceAction(t){
+ const s = t.faceState;
+ if(!s || !s.nameable || s.named >= s.nameable) return '';
+ return '<button class="namebtn" data-act="label" data-kind="faces"'
+  + ' data-cid="' + esc(t.contentId)
+  + '" title="Look at each face and pick who it is">'
+  + 'Name faces<span class="n">' + (s.nameable - s.named)
   + '</span></button> ';
 }
 

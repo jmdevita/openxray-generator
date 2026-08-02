@@ -111,7 +111,7 @@ anything.
 A title becomes a timeline through independent, provenance-gated passes:
 
 - **index** — decode frames, embed faces, cluster them, label the clusters
-  against TMDb reference headshots → `actorIntervals`
+  against reference photos from Wikimedia Commons → `actorIntervals`
 - **people** — biographies and known-for, cached across titles
 - **trivia** — Wikidata (CC0) and paraphrased Wikipedia, each fact citing its
   origin

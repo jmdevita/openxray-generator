@@ -66,8 +66,16 @@ def label_clusters(centroids, refs, threshold=0.363):
 
 @dataclass
 class FaceHit:
+    """One detected face: where in the media, and where in the frame.
+
+    `bbox` is (x, y, w, h) in the frame's pixels, optional because the
+    matching path never needed it. Naming a cluster does: showing a person
+    the faces they are about to name means cropping them back out of the
+    frame, and both engine paths already know the box at detection time.
+    """
     frame_index: int
     timestamp_ms: int
+    bbox: tuple | None = None
 
 
 def build_intervals(hits, labels, cluster_to_actor, sample_fps,

@@ -7,11 +7,11 @@ provenance-stamped, validated. A title with no TMDb id has no content
 identity and is refused. Trivia is NOT fetched here; that's the trivia pass.
 
 Pipeline: Plex metadata → frames over the direct-play URL → YuNet/SFace →
-HDBSCAN cluster → label against TMDb reference headshots → actorIntervals.
+HDBSCAN cluster → label against reference headshots → actorIntervals. Which
+headshots is `enrollment_cast`'s business, not this pipeline's.
 """
 from __future__ import annotations
 
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,9 +19,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .. import engines, progress, refs as refsmod, schema, store as st
-from ..faces import cluster as clu
+from .. import (engines, faceprints as fpmod, keys, progress,
+                refs as refsmod, schema, store as st)
+from ..faces import cluster as clu, crops
 from ..frames import extract_frames
+from ..sources import commons
 from ..sources.base import MediaSource
 
 
@@ -39,7 +41,13 @@ class Unsupported(Exception):
 @dataclass
 class IndexOptions:
     fps: float = 0.5
-    threshold: float = 0.363
+    #: Cosine at which a cluster is claimed to BE a cast member. Was SFace's
+    #: generic 0.363 default, which is not a measurement of this task and was
+    #: too low: on the Billions pilot it put 122 seconds of one actor's
+    #: screen time under another actor's name at 0.373, while every true
+    #: match scored 0.656 or better. faceprints.MATCH_THRESHOLD sits in that
+    #: gap. Override with --threshold; lower it and false claims come back.
+    threshold: float = fpmod.MATCH_THRESHOLD
     min_cluster_size: int = 5
     min_run: int = 2
     start_s: float = 0.0
@@ -133,7 +141,9 @@ def faces_to_hits(det_faces: list[dict], frames) -> tuple[list, list]:
         if ts is None:
             continue
         embeddings.append(np.asarray(f["embedding"], dtype=np.float32))
-        hits.append(clu.FaceHit(f["frame_index"], ts))
+        box = f.get("bbox")
+        hits.append(clu.FaceHit(f["frame_index"], ts,
+                                tuple(box) if box else None))
     return embeddings, hits
 
 
@@ -168,6 +178,96 @@ def resolve(source: MediaSource, *, rating_key: str | None, search: str | None) 
     print(f"[{tag}] using ratingKey {chosen['ratingKey']} (first match; "
           f"pass --rating-key to override)")
     return source.resolve(chosen["ratingKey"])
+
+
+def enrollment_cast(cast, store_dir: Path):
+    """The same cast with its REFERENCE PHOTOS swapped for the chosen source.
+
+    Identity is deliberately untouched -- same actorIds, names, characters --
+    so the timeline, the manifest, and every downstream join are unaffected
+    by which photos happened to enroll the references. Only `images` moves.
+
+    The document keeps TMDb's `thumb` for display: that is metadata use, not
+    ML use, and Commons portraits are thinner (many cast members have none),
+    so swapping the display too would trade a licence question we do not have
+    for a visibly emptier cast panel.
+    """
+    if keys.enrollment_source() != "commons":
+        return cast
+    out = commons.cast_with_cache(cast, Path(store_dir) / commons.CACHE_NAME)
+    have, had = (sum(1 for m in c if m.get("images")) for c in (out, cast))
+    print(f"[refs]   enrolment photos from Wikimedia Commons: {have} of "
+          f"{len(cast)} cast have one (TMDb had {had})")
+    return out
+
+
+def _apply_faceprints(store_dir, content_id, centroids, cluster_to_actor):
+    """Let faces named in EARLIER episodes name themselves here.
+
+    A cast photo is a stranger's portrait; a faceprint is this production's
+    own footage, which is why it separates about three times as cleanly
+    (faceprints.PROPAGATE_THRESHOLD carries the measurement). Cast photos
+    still go first: they name the whole cast at once, and a print only
+    exists for someone a person has already sat and named.
+
+    In-place on `cluster_to_actor`, so the intervals this pass writes
+    already carry the inherited names -- index a season after labelling one
+    episode and the rest arrive named.
+    """
+    key = fpmod.series_key(content_id or "")
+    if not key:
+        return 0
+    store = fpmod.read_prints(store_dir)
+    if not store:
+        return 0
+    # Same series only. Cross-title propagation is plausible but unmeasured,
+    # and a face that ages five years between shows is exactly where this
+    # would go wrong; those stay suggestions on the labelling screen.
+    refs = {}
+    for actor_id, rec in store.items():
+        if fpmod.series_key(rec.get("from") or "") != key:
+            continue
+        v = np.asarray(rec["embedding"], dtype=np.float32)
+        n = np.linalg.norm(v)
+        if n:
+            refs[actor_id] = v / n
+    if not refs:
+        return 0
+    unnamed = {lab: c for lab, c in centroids.items()
+               if lab not in cluster_to_actor}
+    got = clu.label_clusters(unnamed, refs,
+                             threshold=fpmod.PROPAGATE_THRESHOLD)
+    cluster_to_actor.update(got)
+    if got:
+        print(f"[refs]   {len(got)} cluster(s) named from faces you named in "
+              f"earlier episodes")
+    return len(got)
+
+
+def _record_clusters(store_dir, content_id, cluster_labels, hits, centroids,
+                     matched, frames, *, runtime_ms, fps, model_version):
+    """Write the cluster document + exemplar crops for the labelling screen.
+
+    Best-effort by design: this is an aid to a later, optional human step,
+    and a timeline that indexed cleanly must not be failed because a crop
+    could not be written.
+    """
+    if not content_id:
+        return
+    try:
+        doc = fpmod.build_clusters(
+            content_id=content_id, labels=cluster_labels, hits=hits,
+            centroids=centroids, matched=matched, runtime_ms=runtime_ms,
+            sample_fps=fps, generated=schema.now_iso(), version=model_version)
+        fpmod.write_clusters(store_dir, content_id, doc)
+        n = crops.write_crops(doc, frames,
+                              fpmod.crops_dir(store_dir, content_id))
+        offer = sum(1 for c in doc["clusters"]
+                    if c["nameable"] and not c["matched"])
+        print(f"[faces]  {len(doc['clusters'])} clusters kept, {offer} "
+              f"unnamed and worth naming ({n} crop montages)")
+    except Exception as e:                      # noqa: BLE001 - see docstring
+        print(f"[faces]  (could not record clusters for naming: {e})")
 
 
 def run(store_dir: Path, work_dir: Path, *, source: MediaSource,
@@ -272,7 +372,8 @@ def run(store_dir: Path, work_dir: Path, *, source: MediaSource,
             if img is not None:
                 for det in embedder.detect(img):
                     embeddings.append(embedder.embed(img, det))
-                    hits.append(clu.FaceHit(fr.index, fr.timestamp_ms))
+                    hits.append(clu.FaceHit(fr.index, fr.timestamp_ms,
+                                            tuple(det.bbox)))
             # Counts frames READ, not frames with a face: an unreadable or
             # empty frame is still work done, and a bar that stalled on a
             # faceless stretch would be lying.
@@ -296,15 +397,27 @@ def run(store_dir: Path, work_dir: Path, *, source: MediaSource,
     cluster_labels = clu.cluster_embeddings(
         embeddings, min_cluster_size=opts.min_cluster_size)
     centroids = clu.cluster_centroids(embeddings, cluster_labels)
+    enroll_cast = enrollment_cast(cast, store_dir)
     print(f"[refs]   building references for {len(cast)} cast members …")
     if transport is None:
-        refs = refsmod.build_reference_embeddings(cast, embedder)
+        refs = refsmod.build_reference_embeddings(enroll_cast, embedder)
     else:
         refs = refsmod.build_reference_embeddings_http(
-            cast, transport, work_dir / "refs")
+            enroll_cast, transport, work_dir / "refs")
     cluster_to_actor = clu.label_clusters(centroids, refs, threshold=opts.threshold)
+    _apply_faceprints(store_dir, content_id, centroids, cluster_to_actor)
     intervals = clu.build_intervals(hits, cluster_labels, cluster_to_actor,
                                     opts.fps, min_run=opts.min_run)
+
+    # Clusters the references could not name are not waste: on live action
+    # they are mostly real, credited characters whose only problem is that
+    # no free-licensed photo of them exists. Persist every cluster (plus a
+    # few exemplar crops) so a person can name them afterwards, and do it
+    # while the frames still exist -- work_dir does not outlive this call.
+    _record_clusters(store_dir, content_id, cluster_labels, hits, centroids,
+                     cluster_to_actor, frames,
+                     runtime_ms=item.get("durationMs") or 0, fps=opts.fps,
+                     model_version=model_version)
 
     progress.emit("writing")
     doc = schema.timeline(content_id, refsmod.public_cast(cast),
