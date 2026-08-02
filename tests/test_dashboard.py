@@ -245,3 +245,10 @@ class TestPageTitles(unittest.TestCase):
     def test_the_api_docs_agree(self):
         """Was a third name for the same app."""
         self.assertEqual(O.app.title, "OpenXray Generator")
+
+    def test_the_masthead_agrees_with_the_tab(self):
+        """The tab said "OpenXray Generator" while the header on the page
+        said plain "OpenXray" -- so the one name a person actually reads was
+        the ambiguous one."""
+        for page in (O.dashboard(), O._LOGIN_PAGE):
+            self.assertIn("OpenXray Generator</div>", page)

@@ -1407,7 +1407,7 @@ _HEAD = ('<!doctype html><meta charset="utf-8">'
          + _FAVICON)
 
 _LOGIN_PAGE = _HEAD + "<title>OpenXray Generator sign-in</title>" + _STYLE + r"""
-<header><div class="brand"><span class="mark"><i></i></span> OpenXray</div></header>
+<header><div class="brand"><span class="mark"><i></i></span> OpenXray Generator</div></header>
 <main>
  <div class="card">
   <h2>Paste the web UI token</h2>
