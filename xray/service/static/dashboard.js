@@ -865,6 +865,7 @@ async function loadStore(){
    + '</div></td><td class="acts">'
    + speakerAction(t)
    + faceAction(t)
+   + musicAction(t)
    // Offered whenever anything is missing, not just faces: with a selection
    // it runs exactly what is ticked, and with none it fills every gap.
    + ((rk && (!t.blocks.faces || !t.blocks.music || !t.blocks.people
@@ -1004,6 +1005,19 @@ function faceAction(t){
   + ' data-cid="' + esc(t.contentId)
   + '" title="Look at each face and pick who it is">'
   + 'Name faces<span class="n">' + (s.nameable - s.named)
+  + '</span></button> ';
+}
+
+
+// Music cues the pass could not name. Offered even when zero are outstanding
+// would be noise, so like the other two it disappears when the work is done.
+function musicAction(t){
+ const s = t.musicState;
+ if(!s || s.named >= s.total) return '';
+ return '<button class="namebtn" data-act="label" data-kind="music"'
+  + ' data-cid="' + esc(t.contentId)
+  + '" title="Listen to each cue and type the song">'
+  + 'Name music<span class="n">' + (s.total - s.named)
   + '</span></button> ';
 }
 

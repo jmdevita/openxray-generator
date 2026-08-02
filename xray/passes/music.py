@@ -14,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .. import engines, store as st
+from .. import engines, musiccues as mc, store as st
 from ..music import discovery as disc
 
 BLOCK_VERSION = "audd-v1"
@@ -122,11 +122,24 @@ def run(store_dir: Path, key: str, audd_token: str, *,
         matches.append(m)
 
     budget.spend(len(matches))
-    songs = disc.consolidate(matches)
-    intervals = disc.to_music_intervals(songs)
-    print(f"\n{len(intervals)} distinct song interval(s)  "
-          f"[AudD this month: {budget.used}"
+
+    # Persist EVERY cue, not just the recognised ones. Segmentation is the
+    # reliable half of this pass and identification is not: the first feature
+    # this ran against produced 31 good cues and one name. The rest are not
+    # waste, they are work for a person who can hear them (see musiccues.py).
+    cid = doc.get("contentId") or tl_path.stem
+    cue_doc = mc.build_cues(content_id=cid, cues=cues, matches=matches,
+                            generated=st.now_iso(), version=BLOCK_VERSION)
+    mc.write_cues(store_dir, cid, cue_doc)
+
+    intervals = mc.intervals(store_dir, cid)
+    named = sum(1 for c in cue_doc["cues"] if c["matched"])
+    print(f"\n{len(intervals)} distinct song interval(s) from {named} of "
+          f"{len(cues)} cue(s)  [AudD this month: {budget.used}"
           + (f"/{budget.monthly}]" if budget.monthly > 0 else "]"))
+    if named < len(cues):
+        print(f"{len(cues) - named} cue(s) unidentified — name them in the "
+              f"dashboard and the intervals fill in.")
     doc["musicIntervals"] = intervals
     st.stamp(doc, "music", BLOCK_VERSION)
     st.write_timeline(tl_path, doc)

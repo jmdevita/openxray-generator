@@ -129,9 +129,21 @@ def _read_names(path: Path) -> dict:
 
 
 def _music_holding(store: Path, content_id: str) -> str:
-    if _stamped(store, content_id, "music"):
+    """The harvested audio is needed twice: once by the music pass, and again
+    by the labelling screen, which cuts a preview of each unidentified cue
+    out of it.
+
+    Releasing on the provenance stamp alone was wrong -- it freed the file the
+    moment the pass finished, which is exactly when the naming work starts.
+    Same shape as the speakers rule, for the same reason.
+    """
+    if not _stamped(store, content_id, "music"):
+        return "the music pass has not run yet"
+    from . import musiccues as mc
+    left = mc.unnamed(store, content_id)
+    if not left:
         return ""
-    return "the music pass has not run yet"
+    return f"{left} music cue{'s' if left != 1 else ''} still to name"
 
 
 def survey(store_dir, *, busy=()) -> dict:

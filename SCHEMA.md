@@ -74,7 +74,7 @@ Every pass validates before writing (`store.write_timeline`).
   "musicIntervals": [                  // owned by: enrich_music.py
     { "title": "Layla", "artist": "Derek & The Dominos",
       "startMs": 512000, "endMs": 641000, "confidence": null,
-      "source": "audd" }               // "audd" (discovered) | "library" (owned)
+      "source": "audd" }               // see the source/confidence note below
   ],
 
   // trivia, owned by: enrich_trivia.py (Wikidata + Wikipedia, derived from
@@ -129,3 +129,19 @@ A 1,000-title library ≈ 160 MB of JSON. Fine.
 - **Jellyfin Media Segments export**: a possible future pass
   (musicIntervals → typed segments, ms → ticks); lossy by design (their enum
   has no music/actor types).
+
+**`musicIntervals[].source` and `confidence`.** Who says this is that song:
+
+| `source` | Meaning | `confidence` |
+|---|---|---|
+| `"audd"` | An AudD lookup recognised a probe of the cue | `null` — AudD exposes no numeric score |
+| `"manual"` | A person listened to the cue and typed it | `null` — a person is not a probability |
+| `"library"` | Fingerprint-matched against a song the user owns | a real score may appear here |
+| `null` | Unrecorded (a producer that predates this note) | `null` |
+
+`confidence` is therefore `null` for everything except `library`, and a
+consumer must treat a missing or null confidence as "no opinion", never as
+zero. Identification is separate from segmentation: cues are found reliably
+and named unreliably, so a title commonly carries fewer intervals than it has
+music, and cues nobody has identified are simply absent from this list.
+

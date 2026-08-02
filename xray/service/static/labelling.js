@@ -54,7 +54,32 @@ const LAB_KINDS = {
     + 'appearing in fewer than ' + L.minScenes + ' scenes: extras, blurred '
     + 'background faces, and the occasional lamp.',
  },
+ // Music is the speakers shape with a different question: you listen, then
+ // you TYPE. There is no list to pick from — a song is not a person, and
+ // nothing in the timeline knows the soundtrack in advance.
+ music: {
+  api: 'api/music',
+  field: 'cue',
+  id: r => r.cue,
+  noun: 'cue', material: 'music',
+  total: L => L.musicSeconds,
+  freeText: true,
+  preview: r => '<button class="play" data-act="labplay" data-row="'
+    + esc(String(r.cue)) + '">'
+    + (LAB_PLAYING === String(r.cue) ? '❚❚' : '▶') + '</button>',
+  // WHERE it happens matters here in a way it does not for a face: you are
+  // about to go and listen to that moment in the film.
+  stats: r => (LAB_PLAYING === String(r.cue) ? 'playing' : labSecs(r.seconds))
+    + ' · at ' + labClock(r.startMs),
+  floor: () => '',   // no floor: every cue the segmenter kept is nameable
+ },
 };
+
+// mm:ss position of a cue in the film.
+function labClock(ms){
+ const t = Math.floor((ms || 0) / 1000);
+ return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0');
+}
 
 const labCount = () => Object.keys(LAB_PENDING).length;
 const labId = r => String(LAB_K.id(r));
@@ -176,7 +201,9 @@ function labRow(r){
  if(role){
    who = '<button class="chip' + (auto ? ' auto' : ' on')
      + '" data-act="labedit" data-row="' + esc(id) + '">'
-     + esc(role.character) + '</button>'
+     + esc(LAB_K.freeText
+            ? role.title + (role.artist ? ' · ' + role.artist : '')
+            : role.character) + '</button>'
      + (dirty ? '<span class="spknote owed">unsaved</span>'
         // An automatic match is a claim nobody has checked. One at 0.373 put
         // two minutes of one actor under another's name, and only a person
@@ -201,6 +228,16 @@ function labRow(r){
 }
 
 function labPicker(r, selected){
+ // Music has nothing to pick FROM: the timeline knows the cast in advance
+ // and never knows the soundtrack, so this one is two text fields.
+ if(LAB_K.freeText){
+  const cur = labShown(r) || {};
+  return '<span class="labtext">'
+   + '<input data-act="labtitle" data-row="' + esc(labId(r)) + '"'
+   + ' placeholder="song title" value="' + esc(cur.title || '') + '">'
+   + '<input data-act="labartist" data-row="' + esc(labId(r)) + '"'
+   + ' placeholder="artist" value="' + esc(cur.artist || '') + '"></span>';
+ }
  // The title's own cast, so a pick is an entity with an id rather than typed
  // text something downstream would have to reconcile.
  return '<select data-act="labpick" data-row="' + esc(labId(r)) + '">'
@@ -224,6 +261,17 @@ function wireLabelling(){
      const c = LAB.cast.find(x => x.actorId === s.value);
      labStage(s.dataset.row, c ? {actorId: c.actorId,
                                   character: c.character || c.name} : null);
+   });
+ // Staged on `change` (blur / Enter), not on every keystroke: a per-character
+ // stage would count "S", "Se", "Sex"… as edits and make the Save counter
+ // meaningless.
+ document.querySelectorAll('[data-act="labtitle"],[data-act="labartist"]')
+   .forEach(i => i.onchange = () => {
+     const row = i.dataset.row;
+     const box = i.parentNode;
+     const title = box.querySelector('[data-act="labtitle"]').value.trim();
+     const artist = box.querySelector('[data-act="labartist"]').value.trim();
+     labStage(row, title ? {title: title, artist: artist} : null);
    });
  document.querySelectorAll('[data-act="labtake"]').forEach(b =>
    b.onclick = () => labStage(b.dataset.row, {
@@ -269,8 +317,14 @@ async function labSave(){
  let last = null;
  for(const [id, role] of Object.entries(LAB_PENDING)){
    const body = {};
-   body[LAB_K.field] = LAB_K.field === 'cluster' ? parseInt(id, 10) : id;
-   if(role){
+   // Numeric ids stay numeric: `cluster` and `cue` are ints server-side,
+   // `speaker` is a label like "SPEAKER_03".
+   body[LAB_K.field] = LAB_K.field === 'speaker' ? id : parseInt(id, 10);
+   if(LAB_K.freeText){
+     // An empty title is how a row is CLEARED, so it is sent, not skipped.
+     body.title = (role && role.title) || '';
+     body.artist = (role && role.artist) || '';
+   } else if(role){
      body.actor_id = role.actorId;
      body.character = role.character;
      body.sim = role.sim || null;

@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import secrets as pysecrets
+import subprocess
 import threading
 import time
 import urllib.parse
@@ -42,7 +43,7 @@ from pydantic import BaseModel
 
 from .. import engines
 from .. import keys as k
-from .. import faceprints as fpmod, voiceprints as vpmod
+from .. import faceprints as fpmod, musiccues as mcmod, voiceprints as vpmod
 from .. import pipeline, prints, retention, settings_store as ss, store as st
 from ..budget import AuddBudget
 from .. import progress
@@ -425,6 +426,7 @@ def _inventory() -> list[dict]:
             # which no other block ever needs to express.
             "speakerState": _speaker_state(doc),
             "faceState": _face_state(doc),
+            "musicState": _music_state(doc),
             "lookup": rev.get(f.name, []),
             "intervals": len(doc.get("actorIntervals") or []),
             "songs": len(doc.get("musicIntervals") or []),
@@ -1284,6 +1286,143 @@ def _rebuild_face_intervals(content_id: str, clusters: dict,
         "version": f"{clusters.get('version') or 'sface-v1'} + human"}
     st.write_timeline(path, doc)
     return len(fresh)
+
+
+# --- music cue labelling ----------------------------------------------------
+#
+# Same shape as speakers: the pass finds WHERE music plays reliably and often
+# fails to say WHAT it is, so every cue is offered to a person who can hear it.
+
+
+def _timeline_title(content_id: str) -> str | None:
+    """Display title for the labelling screen header, or None. Advisory only
+    -- the screen falls back to the content id."""
+    try:
+        return json.loads(
+            st.canonical_path(STORE, content_id).read_text()).get("title")
+    except (OSError, ValueError):
+        return None
+
+
+def _music_state(doc: dict) -> dict | None:
+    """{total, named} for a title with segmented cues, else None.
+
+    Unlike faces and speakers there is no floor and no percentage of covered
+    material: every cue the segmenter kept is worth naming, and a two-minute
+    needle-drop is not more "done" than a ten-second sting.
+    """
+    cid = doc.get("contentId")
+    if not cid:
+        return None
+    cues = mcmod.read_cues(STORE, cid)
+    if not cues or not (cues.get("cues") or []):
+        return None
+    left = mcmod.unnamed(STORE, cid)
+    total = len(cues["cues"])
+    return {"total": total, "named": total - left}
+
+
+def _music_audio(content_id: str) -> Path:
+    """The harvested track the index pass pulled. Retention holds it while
+    any cue is unnamed, precisely so this exists."""
+    return STORE / "music_work" / content_id / f"{content_id}__audio.mp3"
+
+
+@app.get("/api/music/{content_id}")
+def api_music(content_id: str):
+    doc = mcmod.read_cues(STORE, content_id)
+    if not doc:
+        raise HTTPException(404, "no music cues for this title")
+    names = mcmod.read_names(STORE, content_id)
+    rows = []
+    for cue in doc.get("cues") or []:
+        what = mcmod.settled(cue, names)
+        given = names.get(str(cue["cue"]))
+        rows.append({
+            "cue": cue["cue"],
+            "seconds": cue["seconds"],
+            "startMs": cue["startMs"],
+            "endMs": cue["endMs"],
+            # What a lookup guessed, kept separate from what a person typed so
+            # the screen can show one as a suggestion and the other as fact.
+            "matched": cue.get("matched"),
+            "assigned": ({"title": given["title"],
+                          "artist": given.get("artist") or ""} if given else None),
+            "settled": what is not None,
+        })
+    total = sum(c["seconds"] for c in doc.get("cues") or [])
+    named = sum(1 for r in rows if r["settled"])
+    # `rows` (not `cues`) because the labelling screen is shared with faces
+    # and speakers and reads that key for all three.
+    return {"contentId": content_id, "rows": rows, "title": _timeline_title(content_id),
+            "musicSeconds": round(total, 1), "named": named,
+            "total": len(rows),
+            "audioAvailable": _music_audio(content_id).exists()}
+
+
+@app.get("/api/music/{content_id}/clip/{cue}")
+def api_music_clip(content_id: str, cue: int):
+    """The cue itself, so a person can hear what they are naming.
+
+    Cut from the middle rather than the head: a cue's first seconds are often
+    the tail of the previous scene fading out, and the recognisable part of a
+    song is rarely its first bar.
+    """
+    doc = mcmod.read_cues(STORE, content_id)
+    row = next((c for c in (doc or {}).get("cues") or [] if c["cue"] == cue), None)
+    if row is None:
+        raise HTTPException(404, "no such cue")
+    audio = _music_audio(content_id)
+    if not audio.exists():
+        raise HTTPException(404, "the harvested audio is gone; re-run the pass")
+
+    out = STORE / "music" / "clips" / content_id / f"cue_{cue}.mp3"
+    if not out.exists():
+        out.parent.mkdir(parents=True, exist_ok=True)
+        span = (row["endMs"] - row["startMs"]) / 1000.0
+        length = min(20.0, span)
+        start = row["startMs"] / 1000.0 + max(0.0, (span - length) / 2)
+        cp = subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.2f}",
+             "-t", f"{length:.2f}", "-i", str(audio),
+             "-ac", "1", "-c:a", "libmp3lame", "-b:a", "96k", str(out)],
+            capture_output=True, text=True)
+        if cp.returncode != 0:
+            raise HTTPException(500, f"clip failed: {cp.stderr.strip()[-200:]}")
+    return FileResponse(out, media_type="audio/mpeg")
+
+
+class MusicNameRequest(BaseModel):
+    cue: int
+    title: str = ""
+    artist: str = ""
+
+
+@app.post("/api/music/{content_id}/name")
+def api_name_music(content_id: str, req: MusicNameRequest):
+    """Name a cue, then rebuild the timeline's musicIntervals from scratch.
+
+    Rebuilt rather than appended: consecutive cues carrying the same song
+    collapse into one interval, and that can only be decided by looking at
+    the whole run, not at the cue that just changed.
+    """
+    if mcmod.read_cues(STORE, content_id) is None:
+        raise HTTPException(404, "no music cues for this title")
+    mcmod.name_cue(STORE, content_id, req.cue,
+                   title=req.title, artist=req.artist)
+
+    intervals = mcmod.intervals(STORE, content_id)
+    path = st.canonical_path(STORE, content_id)
+    if path.exists():
+        doc = json.loads(path.read_text())
+        doc["musicIntervals"] = intervals
+        # Stamped as human-touched, the same way naming a face restamps its
+        # provenance: a later automated pass must not silently overwrite it.
+        doc.setdefault("provenance", {})["music"] = {
+            "generated": st.now_iso(), "version": "audd-v1 + human"}
+        st.write_timeline(path, doc)
+    return {"intervals": len(intervals),
+            "unnamed": mcmod.unnamed(STORE, content_id)}
 
 
 @app.get("/api/export/{content_id}")

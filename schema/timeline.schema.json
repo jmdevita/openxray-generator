@@ -242,6 +242,7 @@
             "enum": [
               "audd",
               "library",
+              "manual",
               null
             ]
           }
