@@ -41,12 +41,8 @@ class Unsupported(Exception):
 @dataclass
 class IndexOptions:
     fps: float = 0.5
-    #: Cosine at which a cluster is claimed to BE a cast member. Was SFace's
-    #: generic 0.363 default, which is not a measurement of this task and was
-    #: too low: on the Billions pilot it put 122 seconds of one actor's
-    #: screen time under another actor's name at 0.373, while every true
-    #: match scored 0.656 or better. faceprints.MATCH_THRESHOLD sits in that
-    #: gap. Override with --threshold; lower it and false claims come back.
+    #: Was SFace's generic 0.363, which put 122 seconds of one actor under
+    #: another's name; faceprints.MATCH_THRESHOLD carries the measurement.
     threshold: float = fpmod.MATCH_THRESHOLD
     min_cluster_size: int = 5
     min_run: int = 2
@@ -204,15 +200,9 @@ def enrollment_cast(cast, store_dir: Path):
 def _apply_faceprints(store_dir, content_id, centroids, cluster_to_actor):
     """Let faces named in EARLIER episodes name themselves here.
 
-    A cast photo is a stranger's portrait; a faceprint is this production's
-    own footage, which is why it separates about three times as cleanly
-    (faceprints.PROPAGATE_THRESHOLD carries the measurement). Cast photos
-    still go first: they name the whole cast at once, and a print only
-    exists for someone a person has already sat and named.
-
-    In-place on `cluster_to_actor`, so the intervals this pass writes
-    already carry the inherited names -- index a season after labelling one
-    episode and the rest arrive named.
+    Cast photos go first: they cover the whole cast, while a print only
+    exists for someone already named by hand. Mutates `cluster_to_actor`, so
+    this pass's intervals carry the inherited names.
     """
     key = fpmod.series_key(content_id or "")
     if not key:

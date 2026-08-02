@@ -1,16 +1,9 @@
-"""Exemplar face crops: what a person actually looks at when naming a cluster.
+"""Exemplar face crops: what a person looks at when naming a cluster.
 
-Kept out of the store module on purpose -- that one is pure bookkeeping, this
-one needs OpenCV and the decoded frames, which exist only while the pass is
-running. Frames are deleted with the work directory, so the crops have to be
-cut before it goes.
-
-Three exemplars per cluster, drawn from WIDELY separated points in the
-runtime rather than consecutive samples. Consecutive faces look alike even
-when clustering has merged two people; start/middle/end makes an impure
-cluster visible as the face changing partway along the row, which is the only
-purity check a person can actually perform at a glance. (It is the same
-argument the speaker audition clips are built on, for the same reason.)
+Cut during the pass, because the frames go with the work directory. Three
+per cluster from widely separated points, not consecutive ones: an impure
+cluster then shows up as the face changing partway along the row, which is
+the only purity check a glance can perform.
 """
 from __future__ import annotations
 

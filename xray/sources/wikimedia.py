@@ -1,16 +1,8 @@
-"""One HTTP client for everything Wikimedia: Wikidata, Wikipedia, Commons.
+"""One HTTP client for Wikidata, Wikipedia and Commons.
 
-Two house rules govern every call, and three call sites had each grown their
-own copy of both:
-
-  * Wikimedia REQUIRES a descriptive User-Agent and rejects anonymous
-    clients outright.
-  * It rate-limits bursts with 429 + Retry-After, and a swallowed 429 looks
-    exactly like "this actor has no photo" -- which is how a first
-    enrollment run silently lost half a cast.
-
-So both live here now, and a new caller gets them by construction rather
-than by remembering.
+Wikimedia requires a descriptive User-Agent and rate-limits bursts with 429.
+Three call sites had each grown their own copy of both; a swallowed 429 looks
+exactly like "this actor has no photo", which once cost half a cast.
 """
 from __future__ import annotations
 

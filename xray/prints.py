@@ -1,23 +1,12 @@
-"""Durable identity references — "this embedding is Wendy Rhoades" — for any
-modality that produces embeddings.
+"""Durable identity references — "this embedding is Wendy Rhoades".
 
-Two things live in a store, and keeping them apart matters:
+CLUSTERS are per-title scratch, shaped differently per modality, so each
+writes its own. PRINTS are the durable half and identical everywhere, which
+is why enrol/suggest live here once.
 
-CLUSTERS are per-title scratch: "this title has 52 face clusters, here is when
-each appears and what each looks like". Regenerated whenever the pass re-runs,
-and shaped differently per modality (turns for voices, spans and crops for
-faces), so each modality writes its own.
-
-PRINTS are the durable asset, and they are the same shape everywhere: a
-normalized vector, the identity a human attached to it, and the title it came
-from. Enrolling and suggesting are pure vector arithmetic with a threshold,
-which is why they live here once instead of once per modality.
-
-Deliberately NOT in the timeline, in either case. A timeline is a public
-artefact that gets shared and republished; embeddings are biometric, derived
-from copyrighted media, and useful only to the machine that computes more of
-them. The timeline carries INTERVALS -- facts about when someone appears or
-speaks -- and nothing else.
+Neither ever enters a timeline: embeddings are biometric and derived from
+copyrighted media, so they stay on the machine that made them. Timelines
+carry intervals.
 """
 from __future__ import annotations
 
@@ -28,16 +17,11 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Kind:
-    """One modality's store: where it lives and how strict it is.
-
-    Every threshold here was measured, not chosen. See the modality modules
-    for what each number came from -- guessing them produces either silent
-    wrong identities or a screen full of noise.
-    """
+    """One modality's store: where it lives and how strict it is. Every
+    threshold was measured; the modality modules carry the evidence."""
     name: str            #: subdirectory under the store, e.g. "speakers"
-    prints_file: str     #: named for the modality, not the directory, and
-                         #: fixed once written: renaming it orphans the
-                         #: identities a user has already typed in
+    prints_file: str     #: fixed once written -- renaming orphans the
+                         #: identities somebody has already typed in
     enroll_min: float    #: below this a cluster is too thin to enrol
     match_min: float     #: below this a cluster must not be MATCHED
     threshold: float     #: cosine at or above which two prints are one person
@@ -48,15 +32,8 @@ class Kind:
 def confidence(kind: Kind, sim: float | None) -> str:
     """What a similarity is CALLED in front of a person.
 
-    Ordinal on purpose, never a percentage. Cosine is not a probability, and
-    rendering it as one misleads in a specific direction: the face threshold
-    of 0.55 would read as "55% confident" -- a coin flip -- when it is in
-    fact the line above which every measured match was correct. The useful
-    range is compressed as well (unrelated faces sit around 0.3-0.5, the same
-    person 0.65-0.9), so percentages would squeeze "certain" and "wrong" to
-    within a few points of each other. Words carry the ordering honestly and
-    claim no precision the measurement cannot support. The raw number stays
-    available for anyone who wants it.
+    Ordinal, never a percentage: 0.55 is the line above which every measured
+    face match was right, and "55% confident" would read as a coin flip.
     """
     if sim is None:
         return ""

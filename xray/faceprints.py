@@ -1,16 +1,9 @@
 """The faceprint store: face clusters awaiting a name, and names given.
 
-The durable half (enrol, read, suggest) is `prints.py`, shared with voices.
-This module owns the face-specific numbers and the cluster document the
-labelling screen reads.
-
-Why a labelling screen exists at all: the face pass matches clusters against
-cast reference photos, and Wikimedia Commons -- the licence-clean source --
-simply has no photo for many working actors. Measured on the Billions pilot,
-a main-cast character with four minutes of screen time across 41 scenes went
-unmatched purely because nobody has ever released a free-licensed photo of
-him. He is on screen; the reference is what is missing. So the video itself
-becomes the reference, and a person supplies the name.
+Enrol/read/suggest live in `prints.py`, shared with voices. This module owns
+the face-specific numbers and the cluster document the labelling screen
+reads. Every threshold below was measured; the evidence is with it, because
+nothing else can recover it.
 """
 from __future__ import annotations
 
@@ -18,46 +11,26 @@ from pathlib import Path
 
 from . import prints
 
-#: Screen seconds before a cluster is worth putting in front of a person, and
-#: how many separate appearances it needs. Measured on the Billions pilot
-#: (59 min, 2647 faces, 52 clusters) by looking at exemplar crops of every
-#: unmatched cluster:
-#:
-#:   >=28s  every cluster inspected was a clean, nameable character --
-#:          including two child actors and a supporting player, none of whom
-#:          have a Commons photo and none of whom could be matched otherwise
-#:   26s    a cluster that had merged THREE different people
-#:   24s    an out-of-focus background face
-#:   12s, one scene   a lamp (YuNet false positives are real)
-#:
-#: 20s errs deliberately low. Rows are sorted by screen time, so junk sinks
-#: below the fold and costs a glance; a real character dropped by the floor
-#: can never be named at all, and is invisible in the timeline forever.
-#: The two-scene clause kills the single-shot artefacts (the lamp appears
-#: six times in one shot) that seconds alone would admit.
+#: When a cluster is worth showing to a person. From crops of all 41
+#: unmatched clusters on the Billions pilot: >=28s were real characters, 26s
+#: was three people merged, 24s a blurred background face, 12s in one shot a
+#: lamp. Set below the boundary on purpose -- junk sorts to the bottom and
+#: costs a glance, a missed character can never be named at all.
 MIN_SCREEN_S = 20.0
 MIN_SCENES = 2
 
 #: A gap longer than this starts a new appearance, for the scene count.
 SCENE_GAP_S = 5.0
 
-#: Same person above this. From the measured gap on that pilot, not taste:
-#: every true match scored 0.656-0.774 and the two false ones scored 0.373
-#: and 0.486, with nothing in between. 0.55 sits mid-band.
-#:
-#: SFace's generic 0.363 default was demonstrably too low here -- it claimed
-#: 122 seconds of one actor as another, which no amount of downstream care
-#: can fix because nothing reports it. Note the references behind these
-#: numbers are Commons singles, the THINNEST case; richer references score
-#: higher, so this errs on the safe side.
+#: A cluster IS this cast member. True matches scored 0.656-0.774, the two
+#: false ones 0.373 and 0.486, nothing between. SFace's 0.363 default put 122
+#: seconds of one actor under another's name. Measured against Commons
+#: singles, the thinnest references, so it errs safe.
 MATCH_THRESHOLD = 0.55
 
-#: Where "borderline" becomes "good", then "strong", for the words shown
-#: beside a match. From the same pilot: true matches occupied 0.656-0.774, so
-#: 0.60 is just clear of the threshold's margin and 0.70 is the top of the
-#: observed true band. Provisional -- eleven matches on one episode orders
-#: these honestly but does not calibrate them finely, which is exactly why
-#: they are words and not a percentage.
+#: Where the displayed word turns "good", then "strong". True matches
+#: occupied 0.656-0.774. Provisional: eleven matches orders these honestly
+#: but does not calibrate them, which is why they are words not percentages.
 GOOD_MATCH = 0.60
 STRONG_MATCH = 0.70
 
@@ -67,23 +40,10 @@ FACE = prints.Kind(name="faces", prints_file="faceprints.json",
                    strong=STRONG_MATCH)
 
 
-#: Cosine at which a FACEPRINT (rather than a cast photo) names a cluster
-#: outright, in another episode of the same series.
-#:
-#: Measured 2026-08-02, Billions S01E01 against S01E02, both indexed for
-#: real. Same actor across the two: 0.819-0.964. Different actor: -0.123 to
-#: 0.263. A gap of 0.556 -- three times the separation cast photos manage
-#: within one episode, because a faceprint is a centroid of dozens of frames
-#: from the same production rather than one red-carpet portrait years old.
-#:
-#: 0.75 sits 0.07 under the weakest true match and 0.49 over the strongest
-#: false one. Yield was flat from 0.70 to 0.80 (13 of 51 clusters, 58% of
-#: the second episode's screen time) and fell only at 0.85, so this is a
-#: canyon rather than a line to tune.
-#:
-#: Adjacent episodes share a haircut, a wardrobe and probably a shooting
-#: week. Cross-SEASON is the harder, unmeasured case; that is why this
-#: applies within a series and cross-title stays a suggestion.
+#: When a faceprint names a cluster in another episode of the same series.
+#: Billions S01E01 vs S01E02: same actor 0.819-0.964, different actors
+#: -0.123 to 0.263. Yield was flat from 0.70 to 0.80, so this is a canyon,
+#: not a line to tune. Cross-SEASON is unmeasured -- hence series-only.
 PROPAGATE_THRESHOLD = 0.75
 
 
@@ -92,12 +52,7 @@ def confidence(sim: float | None) -> str:
 
 
 def explain(sim: float | None, via: str = "") -> str:
-    """The score, and the only two numbers that make it mean anything.
-
-    Somebody hovering wants to know whether to trust this row, which takes
-    one line: where the right answers have landed, and where the wrong ones
-    did. Not what the arithmetic is called.
-    """
+    """The score, plus where right and wrong answers have actually landed."""
     if sim is None:
         return ""
     if via == "faceprint":
@@ -139,16 +94,14 @@ def prints_path(store_dir: Path) -> Path:
 
 
 def crops_dir(store_dir: Path, content_id: str) -> Path:
-    """Where a cluster's exemplar faces live. Beside the clusters rather than
-    in the pass's work directory, which is cleaned: the screen needs them
-    long after the pass is over."""
+    """Beside the clusters, not in the pass's work directory: the screen
+    needs these long after that is cleaned."""
     return Path(store_dir) / FACE.name / "crops" / content_id
 
 
 def scene_count(times_ms, gap_s: float = SCENE_GAP_S) -> int:
-    """Separate appearances, not samples. A character in six scenes reads
-    very differently from an extra standing in one long shot, and the
-    difference is invisible in a raw sample count."""
+    """Separate appearances, not samples: six scenes reads very differently
+    from one long shot, and a sample count cannot tell them apart."""
     times = sorted(times_ms)
     if not times:
         return 0
@@ -256,19 +209,10 @@ def propagate(store_dir: Path, content_id: str, *,
               threshold: float = PROPAGATE_THRESHOLD) -> dict:
     """Name what the faceprints recognise in the rest of this series.
 
-    Costs no media at all. Every cluster's centroid is already stored, so
-    naming the recurring cast across a season is arithmetic over numbers on
-    disk -- no frames, no decoding, no traffic to the media server. That is
-    what makes this an action a person can press and watch finish, instead
-    of a re-index they have to schedule.
-
-    Writes into each episode's `matched` field, NOT its names file: a
-    faceprint match is the machine's claim, and the screen shows those as
-    "check me" so a wrong one is visible rather than indistinguishable from
-    something a person typed. Human names already in a sibling are left
-    exactly as they are.
-
-    Returns {episode: named_count} for the episodes that changed.
+    Arithmetic over stored centroids: no media, no decoding. Writes to each
+    episode's `matched` field, not its names file, so a propagated name shows
+    as the machine's claim rather than something a person typed. Human names
+    are left alone. Returns {episode: named_count}.
     """
     import numpy as np
     prints_by_actor = read_prints(store_dir)

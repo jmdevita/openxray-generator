@@ -1,18 +1,13 @@
 """Reference photos from Wikimedia Commons, resolved through Wikidata (P18).
 
-The licensing-clean enrollment source. TMDb's API terms (§1.C) bar using
-TMDb Content "in connection with" an ML application, which reaches the face
-pass's headshot enrollment; Commons images carry their own free licenses
-(CC/public domain) with no such clause, and Wikidata's CC0 metadata links an
-actor to them. This source emits the same cast shape as the TMDb/Plex
-sources in refs.py, so enrollment cannot tell the sources apart and actor
-identity still keys on the original actorIds.
+The licence-clean enrollment source: TMDb's terms §1.C bar their content
+"in connection with" an ML application, which reaches headshot enrollment.
 
-Chain per cast member: TMDb person id → the Wikidata item carrying that
-P4985 statement → the item's name must agree with the cast name → P18 image
-statement(s) → Commons Special:FilePath URLs. Members Wikidata does not link
-to TMDb fall back to a name search, accepted only when the match is a human
-(P31=Q5) — names collide with films, bands, and asteroids.
+Per cast member: TMDb person id → the Wikidata item claiming it → the item
+must also NAME that actor → P18 → Commons URLs. Members with no TMDb link
+fall back to a name search, accepted only for humans (P31=Q5), since names
+collide with films, bands and asteroids. Emits the same cast shape as the
+other sources in refs.py, so actorIds are untouched.
 """
 from __future__ import annotations
 
