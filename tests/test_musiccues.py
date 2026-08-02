@@ -10,6 +10,7 @@ import json
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -173,6 +174,53 @@ class TestRetentionInteraction(Base):
         nothing is waiting, and holding the audio forever would be a leak."""
         self.timeline(provenance={"music": {}})
         self.assertEqual(self.group()["reclaimable"], 500)
+
+
+class TestCueEndpointSpans(Base):
+    """The strip position for each cue.
+
+    Its first render had none, so every row drew a full-width empty bar. The
+    arithmetic is a division by the runtime, which is exactly the kind of
+    thing that is fine until a timeline has no runtime.
+    """
+
+    def setUp(self):
+        super().setUp()
+        import os
+        os.environ.setdefault("XRAY_STORE", str(self.store))
+        from xray.service import orchestrator as O
+        self.O = O
+        self._patch = unittest.mock.patch.object(O, "STORE", self.store)
+        self._patch.start()
+        self.addCleanup(self._patch.stop)
+
+    def timeline_with_runtime(self, runtime_ms):
+        doc = {"contentId": self.cid, "provenance": {"music": {}}}
+        if runtime_ms is not None:
+            doc["sourceRuntimeMs"] = runtime_ms
+        (self.store / f"{self.cid}.json").write_text(json.dumps(doc))
+
+    def test_a_cue_is_placed_where_it_happens(self):
+        self.timeline_with_runtime(1_000_000)
+        self.write([cue(250, 350)])          # 250s-350s of a 1000s film
+        row = self.O.api_music(self.cid)["rows"][0]
+        self.assertEqual(row["spans"], [[0.25, 0.1]])
+
+    def test_no_runtime_means_no_span_rather_than_a_crash(self):
+        # A timeline written before sourceRuntimeMs existed. Dividing by it
+        # would raise; drawing a full-width block would lie.
+        self.timeline_with_runtime(None)
+        self.write([cue(250, 350)])
+        self.assertEqual(self.O.api_music(self.cid)["rows"][0]["spans"], [])
+
+    def test_a_zero_runtime_is_treated_as_unknown(self):
+        self.timeline_with_runtime(0)
+        self.write([cue(250, 350)])
+        self.assertEqual(self.O.api_music(self.cid)["rows"][0]["spans"], [])
+
+    def test_no_timeline_at_all_is_survivable(self):
+        self.write([cue(250, 350)])
+        self.assertEqual(self.O.api_music(self.cid)["rows"][0]["spans"], [])
 
 
 if __name__ == "__main__":

@@ -1334,6 +1334,16 @@ def api_music(content_id: str):
     if not doc:
         raise HTTPException(404, "no music cues for this title")
     names = mcmod.read_names(STORE, content_id)
+    # The row strip wants [start, width] as fractions of the runtime. Without
+    # it every row renders an empty grey bar the width of the screen — which
+    # is what the first render of this screen actually looked like.
+    runtime = 0
+    try:
+        runtime = int(json.loads(
+            st.canonical_path(STORE, content_id).read_text()
+        ).get("sourceRuntimeMs") or 0)
+    except (OSError, ValueError):
+        pass
     rows = []
     for cue in doc.get("cues") or []:
         what = mcmod.settled(cue, names)
@@ -1349,6 +1359,12 @@ def api_music(content_id: str):
             "assigned": ({"title": given["title"],
                           "artist": given.get("artist") or ""} if given else None),
             "settled": what is not None,
+            # One block: a cue is a single continuous stretch, unlike a face
+            # that comes and goes. Empty when the runtime is unknown, and the
+            # strip then draws nothing rather than a misleading full-width bar.
+            "spans": ([[round(cue["startMs"] / runtime, 5),
+                        round((cue["endMs"] - cue["startMs"]) / runtime, 5)]]
+                      if runtime else []),
         })
     total = sum(c["seconds"] for c in doc.get("cues") or [])
     named = sum(1 for r in rows if r["settled"])
