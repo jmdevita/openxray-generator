@@ -1050,13 +1050,10 @@ def _rebuild_intervals(content_id: str, clusters: dict, names: dict) -> int:
 
 # --- labelling: faces ----------------------------------------------------
 #
-# Same screen, different sense. Where diarization leaves every speaker
-# anonymous, the face pass NAMES the clusters it can and leaves the rest --
-# so these rows come in three states, not two: matched against a cast photo,
-# suggested from a faceprint learned on another title, or unknown. Matched
-# rows are shown too, and are confirmable: a match at the old default put 122
-# seconds of one actor's screen time under another actor's name, and only a
-# person looking at the face can catch that.
+# Three row states, unlike voices: matched against a cast photo, suggested
+# from a faceprint, or unknown. Matched rows are shown and correctable --
+# a match at the old default claimed 122 seconds of one actor as another,
+# and only a person looking at the face catches that.
 
 
 class FaceNameRequest(BaseModel):

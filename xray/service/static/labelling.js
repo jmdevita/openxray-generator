@@ -287,13 +287,9 @@ async function labSave(){
  labOfferSpread(last);
 }
 
-// Offered here rather than done automatically: quietly rewriting eleven
-// other episodes is the kind of helpfulness that is unforgivable the first
-// time it is wrong. So it is one button, with the real number on it, at the
-// one moment the names exist and the person is still looking.
-//
-// Faces only. A voiceprint carries across titles by design and has no
-// series to be confined to, so there is nothing to offer.
+// A button, not an automatic act: quietly rewriting eleven other episodes
+// is unforgivable the first time it is wrong. Faces only -- voiceprints
+// already carry across titles and have no series to be confined to.
 function labOfferSpread(res){
  const n = res && res.siblings;
  if(!n || LAB_K.api !== 'api/faces') return;
