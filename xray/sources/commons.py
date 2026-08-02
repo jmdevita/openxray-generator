@@ -165,7 +165,8 @@ def image_urls(entity, max_images, width=342):
 
 # --- the cast source ------------------------------------------------------
 
-def commons_cast(cast, session=None, max_images=4, log=print):
+def commons_cast(cast, session=None, max_images=4, log=print,
+                 on_progress=None):
     """`cast` (from any refs.py source) with photos re-pointed at Commons.
 
     Identity fields pass through untouched; `images`/`thumb` are replaced —
@@ -180,6 +181,10 @@ def commons_cast(cast, session=None, max_images=4, log=print):
     for i, m in enumerate(cast):
         if i:
             time.sleep(0.1)   # pace the per-member lookups; Wikimedia 429s bursts
+        # The slow, countable thing in this phase: a paced round trip per
+        # member, longer whenever Wikimedia asks us to back off.
+        if on_progress:
+            on_progress(i, len(cast))
         actor_id = str(m.get("actorId") or "")
         qid = None
         if actor_id.startswith("tmdb:"):
@@ -247,7 +252,7 @@ def _fresh(rec: dict | None, now: float, miss_ttl_s: float) -> bool:
 
 def cast_with_cache(cast, cache_path, *, session=None, max_images=4,
                     miss_ttl_s: float = MISS_TTL_S, now: float | None = None,
-                    log=print):
+                    log=print, on_progress=None):
     """`commons_cast`, asking the network only about members it has not seen.
 
     Actors recur across a library -- the same forty people carry a season --
@@ -263,8 +268,11 @@ def cast_with_cache(cast, cache_path, *, session=None, max_images=4,
     if stale:
         log(f"  (resolving {len(stale)} of {len(cast)} cast on Wikidata; "
             f"{len(cast) - len(stale)} already cached)")
+        # Counted over `stale`, not the whole cast: on a second episode most
+        # of the cast is already cached and the bar would crawl to 20% and
+        # stop, which is the shape of a hang.
         for m in commons_cast(stale, session=session, max_images=max_images,
-                              log=log):
+                              log=log, on_progress=on_progress):
             cache[str(m.get("actorId"))] = {"images": m.get("images") or [],
                                             "checked": now}
         path.parent.mkdir(parents=True, exist_ok=True)

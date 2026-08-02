@@ -189,6 +189,65 @@ class TestDashboardShell(unittest.TestCase):
     def test_login_page_points_at_the_logs(self):
         self.assertIn("docker compose logs orchestrator", O.login_page())
 
+    def test_the_disk_step_is_on_the_settings_screen(self):
+        self.assertIn("'Disk'", self.html)
+        self.assertIn('id="diskUI"', self.html)
+
+    def test_the_bar_is_drawn_from_the_reported_totals(self):
+        # Not from a hardcoded list of kinds: a kind added server-side must
+        # appear without touching the page.
+        self.assertIn("d.kinds.map", self.html)
+
+    def test_freeing_reports_what_went(self):
+        # A redrawn bar shows the new state, not what was taken to reach it.
+        self.assertIn("diskDone", self.html)
+        self.assertIn("Freed '", self.html)
+
+
+class TestStorageEndpoints(unittest.TestCase):
+    def setUp(self):
+        self.store = Path(tempfile.mkdtemp())
+        frames = self.store / "index_work" / "frames"
+        frames.mkdir(parents=True)
+        (frames / "frame_000001.jpg").write_bytes(b"x" * 400)
+        p = mock.patch.object(O, "STORE", self.store)
+        p.start()
+        self.addCleanup(p.stop)
+        O._jobs.clear()
+
+    def test_storage_reports_what_is_on_disk(self):
+        body = O.api_storage()
+        self.assertEqual(body["total"], 400)
+        self.assertEqual(body["reclaimable"], 400)
+
+    def test_clean_frees_it(self):
+        body = O.api_storage_clean(O.CleanRequest())
+        self.assertEqual(body["freed"], 400)
+        self.assertFalse((self.store / "index_work" / "frames").exists())
+        # The caller gets the new state back, so the screen needs no second
+        # request to repaint.
+        self.assertEqual(body["storage"]["total"], 0)
+
+    def test_an_unknown_kind_is_422_not_a_silent_no_op(self):
+        with self.assertRaises(HTTPException) as ctx:
+            O.api_storage_clean(O.CleanRequest(kinds=["timelines"]))
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_a_running_job_holds_the_frames(self):
+        """`current` is a rating key, and a title being indexed for the first
+        time has no content-id mapping yet — so the set is deliberately built
+        to be non-empty even when nothing resolves."""
+        O._jobs.append({"id": 1, "status": "running", "current": "12345"})
+        with mock.patch.object(O, "_backend", lambda: "plex"):
+            self.assertEqual(O.api_storage()["reclaimable"], 0)
+            self.assertEqual(O.api_storage_clean(O.CleanRequest())["freed"], 0)
+        self.assertTrue((self.store / "index_work" / "frames").exists())
+
+    def test_a_finished_job_holds_nothing(self):
+        O._jobs.append({"id": 1, "status": "done", "current": ""})
+        with mock.patch.object(O, "_backend", lambda: "plex"):
+            self.assertEqual(O.api_storage()["reclaimable"], 400)
+
 
 if __name__ == "__main__":
     unittest.main()

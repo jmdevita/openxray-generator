@@ -229,7 +229,7 @@ def _dominant(faces, area):
 
 
 def _collect_reference_embeddings(cast, vec_for_image, max_actors, log,
-                                  fetch=None):
+                                  fetch=None, on_progress=None):
     """Shared enrollment loop for both transports: download each member's
     photos, extract one best-face vector per photo via
     `vec_for_image(image_bytes) -> vec | None`, and average+normalize per
@@ -237,9 +237,14 @@ def _collect_reference_embeddings(cast, vec_for_image, max_actors, log,
     `fetch` resolves at call time (module attr) so tests can patch it."""
     fetch = fetch or _fetch_bytes
     refs = {}
-    for member in cast:
+    for i, member in enumerate(cast):
         if max_actors and len(refs) >= max_actors:
             break
+        # A download plus a detect+embed per photo. Counted over the cast
+        # rather than over photos: a member may have one or four, and a
+        # denominator that moves is worse than a coarse one.
+        if on_progress:
+            on_progress(i, len(cast))
         vecs = []
         for url in member.get("images", []):
             try:
@@ -257,7 +262,8 @@ def _collect_reference_embeddings(cast, vec_for_image, max_actors, log,
     return refs
 
 
-def build_reference_embeddings(cast, embedder, max_actors=None, log=print):
+def build_reference_embeddings(cast, embedder, max_actors=None, log=print,
+                               on_progress=None):
     """{actorId: normalized_avg_vector} via the in-process engine.
 
     Detects the largest face in each reference photo (group-shot protection),
@@ -271,11 +277,13 @@ def build_reference_embeddings(cast, embedder, max_actors=None, log=print):
                          lambda d: d.bbox[2] * d.bbox[3])
         return embedder.embed(img, best) if best is not None else None
 
-    return _collect_reference_embeddings(cast, vec_for_image, max_actors, log)
+    return _collect_reference_embeddings(cast, vec_for_image, max_actors, log,
+                                         on_progress=on_progress)
 
 
 def build_reference_embeddings_http(cast, transport, spool_dir,
-                                    max_actors=None, log=print):
+                                    max_actors=None, log=print,
+                                    on_progress=None):
     """{actorId: normalized_avg_vector} via the engine-faces service.
 
     Photos are spooled one at a time to [spool_dir] (which must live on the
@@ -295,7 +303,8 @@ def build_reference_embeddings_http(cast, transport, spool_dir,
         return np.asarray(best["embedding"], dtype=np.float32)
 
     try:
-        return _collect_reference_embeddings(cast, vec_for_image, max_actors, log)
+        return _collect_reference_embeddings(cast, vec_for_image, max_actors,
+                                             log, on_progress=on_progress)
     finally:
         spool.unlink(missing_ok=True)
 

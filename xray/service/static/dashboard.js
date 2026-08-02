@@ -122,11 +122,20 @@ function renderSetup(){
    : 'Turned off, so every title is computed locally and nothing is shared.',
   ''));
 
+ // Last, and never a numbered step: indexing works without anyone opening
+ // this. It is here because the setup screen is the only place that is about
+ // the installation rather than about a title.
+ steps.push(step('opt', '⌁', 'Disk', '',
+  'Passes leave frames and audio behind. None of it is your timelines, and '
+  + 'all of it rebuilds itself from the media server if a pass needs it again.',
+  '<div id="diskUI">checking…</div>'));
+
  $('setupView').innerHTML =
   '<div><h2>Setup</h2><p class="sub">The first two are required.</p></div>'
   + steps.join('');
  if(!connected) serverUI(0);
  speakersUI();
+ loadDisk();
 }
 
 // ---- speaker model weights -------------------------------------------------
@@ -236,6 +245,82 @@ async function spkFetch(){
   box.innerHTML = spkBody(s);
   spkSync(s);
  } catch(e){ speakersUI(); }
+}
+
+// ---- disk ------------------------------------------------------------------
+//
+// None of this is output. Indexing never downloads the video -- ffmpeg reads
+// the media server's URL -- but it does leave frames and audio behind, and on
+// a three-title store that was 556 MB of intermediate against 700 KB of
+// timeline. Two of the three kinds are load-bearing until a later step
+// consumes them, which is the part no filename can tell you, so the screen
+// says which ones and why rather than offering one undifferentiated Delete.
+
+let DISK = null;
+
+// The exact mirror of retention.human, down to the trailing-.0 trim: the two
+// numbers are read side by side, one in a terminal and one here.
+function bytes(n){
+ if(n < 1000) return n + ' B';
+ const units = ['KB', 'MB', 'GB'];
+ for(let i = 0; i < units.length; i++){
+  n /= 1000;
+  if(n < 1000 || i === units.length - 1)
+   return (n.toFixed(1) + ' ' + units[i]).replace('.0 ', ' ');
+ }
+}
+
+async function loadDisk(){
+ if(!$('diskUI')) return;
+ try { DISK = await j(await fetch('api/storage')); } catch(e){ DISK = null; }
+ renderDisk();
+}
+
+function renderDisk(){
+ const box = $('diskUI');
+ if(!box) return;
+ if(!DISK){ box.textContent = 'checking…'; return; }
+ const d = DISK, total = d.total || 1;
+
+ const bar = d.kinds.map(g => '<i class="k' + g.kind + '" style="width:'
+  + (100 * g.bytes / total).toFixed(2) + '%"></i>').join('');
+
+ const rows = d.kinds.map(g =>
+  '<li><span class="sw k' + g.kind + '"></span>'
+  + '<b>' + esc(g.label) + '</b>'
+  + '<span class="amt">' + bytes(g.bytes) + '</span>'
+  + '<span class="meta">' + esc(g.note) + '</span>'
+  // Per-title, because "208 MB, some of it held" is not actionable and
+  // "Billions S01E01 — the music pass has not run yet" is: it names the step
+  // that would release it.
+  + g.items.map(i => '<span class="held">' + esc(i.contentId) + ' · '
+     + bytes(i.bytes) + ' — ' + esc(i.holding) + '</span>').join('')
+  + '</li>').join('');
+
+ box.innerHTML =
+  '<div class="spread"><span class="meta">' + bytes(d.total)
+  + ' in the store</span>'
+  + (d.reclaimable
+     ? '<button class="sm" onclick="cleanDisk(this)">Free '
+       + bytes(d.reclaimable) + '</button>'
+     : '<span class="meta">Nothing to reclaim.</span>')
+  + '</div>'
+  + '<div class="diskbar">' + bar + '</div>'
+  + '<ul class="disklist">' + rows + '</ul>'
+  + '<div id="diskDone"></div>';
+}
+
+async function cleanDisk(btn){
+ btn.disabled = true;
+ btn.textContent = 'Freeing…';
+ const r = await j(await post('api/storage/clean', {}));
+ DISK = r.storage;
+ renderDisk();
+ // The bar redrawing is not a receipt: it shows the new state, not what was
+ // taken to get there.
+ $('diskDone').innerHTML = '<div class="note"><span>Freed ' + bytes(r.freed)
+  + ' across ' + plural(r.removed.length, 'item')
+  + '. Each one rebuilds itself the next time a pass needs it.</span></div>';
 }
 
 function step(state, bullet, title, tag, body, extra, openNow){
@@ -600,7 +685,8 @@ async function deepenRow(ratingKey, cid, label){
 const STEP_LABEL = {index:'indexing', people:'cast', trivia:'trivia', music:'music'};
 // Phase names are the pass's vocabulary; these are the viewer's.
 const PHASE_LABEL = {frames:'reading the video', faces:'finding faces',
-                     matching:'matching cast', writing:'writing'};
+                     enrolling:'finding cast photos', matching:'matching cast',
+                     writing:'writing'};
 
 function phaseText(job){
  if(!job.phase) return 'working…';
@@ -637,15 +723,19 @@ async function poll(){
  const pct = total ? (100 * Math.min(done + frac, total) / total).toFixed(1) : 0;
  // The rating key is what the user typed; the title is what they meant.
  const live_name = job.currentTitle || job.current;
- const rows = (job.summary || []).slice(-6).map(rowFor).join('')
-  + (job.current && done < total
-     ? '<div class="q live"><span class="ic pulse">●</span>'
-       + '<span class="nm">' + esc(live_name) + '</span>'
-       + '<span class="dt">' + esc(phaseText(job)) + '</span></div>' : '');
  // One title can only ever read 0/1 or 1/1, which looks stuck for the several
  // minutes a full index takes. Show the phase there and keep the count for
  // runs where it actually counts something.
  const counter = total > 1 ? done + ' / ' + total : esc(phaseText(job));
+ const rows = (job.summary || []).slice(-6).map(rowFor).join('')
+  + (job.current && done < total
+     ? '<div class="q live"><span class="ic pulse">●</span>'
+       + '<span class="nm">' + esc(live_name) + '</span>'
+       // Omitted on a single-title run: the counter above is already showing
+       // exactly this string, and the heading already names the title, so the
+       // row was repeating both.
+       + (total > 1 ? '<span class="dt">' + esc(phaseText(job)) + '</span>' : '')
+       + '</div>' : '');
  $('jobView').innerHTML =
   '<div class="sec"><div class="spread"><h2>'
   + (job.request && job.request.level ? 'Indexing ' : 'Seeding ')

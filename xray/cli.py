@@ -9,6 +9,7 @@
   python -m xray.cli enrich music tmdb-tv-62852-s01e01 --media file.mkv
   python -m xray.cli enrich all [keys...]        # people + trivia (music needs a source)
   python -m xray.cli map-jellyfin --server https://jf... --api-key XXXX
+  python -m xray.cli clean --dry-run             # what the passes left behind
 
 The media backend is chosen with `--backend plex|jellyfin` (default plex);
 both are native peers via the MediaSource seam (sources/base.py). `map-jellyfin`
@@ -77,6 +78,43 @@ def cmd_status(args) -> int:
             for b in blocks
         )
         print(f"{f.stem:<28} {marks} {', '.join(rev.get(f.name, []))}")
+    return 0
+
+
+def cmd_clean(args) -> int:
+    """Reclaim the intermediates. Prints the whole picture either way: this
+    deletes megabytes, and a bare "freed 400 MB" gives no way to check that
+    what went was what you meant."""
+    from . import retention
+    store = _store(args)
+    kinds = ([s.strip() for s in args.only.split(",") if s.strip()]
+             if args.only else list(retention.KINDS))
+    unknown = set(kinds) - set(retention.KINDS)
+    if unknown:
+        raise SystemExit(f"unknown kind(s): {', '.join(sorted(unknown))}. "
+                         f"Pick from: {', '.join(retention.KINDS)}")
+
+    report = retention.survey(store)
+    print(f"store: {store}  ({retention.human(report['total'])})\n")
+    for g in report["kinds"]:
+        kept = "" if g["kind"] in retention.KINDS else "   (never reclaimed)"
+        print(f"  {g['label']:<20}{retention.human(g['bytes']):>10}{kept}")
+        for item in g["items"]:
+            print(f"      {item['contentId']:<30}"
+                  f"{retention.human(item['bytes']):>10}   held: "
+                  f"{item['holding']}")
+    print()
+
+    result = retention.clean(store, kinds=kinds, dry_run=args.dry_run)
+    if not result.removed:
+        print("nothing to reclaim.")
+        return 0
+    for c in result.removed:
+        what = f"{c.kind} {c.content_id}".strip()
+        print(f"  {'-' if args.dry_run else '×'} {what:<38}"
+              f"{retention.human(c.bytes):>10}")
+    print(f"\n{'would free' if args.dry_run else 'freed'} "
+          f"{retention.human(result.freed)}")
     return 0
 
 
@@ -258,6 +296,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("status", help="per-title provenance table").set_defaults(func=cmd_status)
     sub.add_parser("validate", help="validate every timeline against the contract").set_defaults(func=cmd_validate)
+
+    pc = sub.add_parser("clean", help="reclaim the intermediates the passes "
+                        "leave behind (frames, harvested audio)")
+    pc.add_argument("--dry-run", action="store_true",
+                    help="show what would go; delete nothing")
+    pc.add_argument("--only", help="comma list of kinds: "
+                    "frames,music,speakers")
+    pc.set_defaults(func=cmd_clean)
 
     pi = sub.add_parser("index", help="birth a timeline from a Plex title (frames+faces)")
     pi.add_argument("--origin", help="Plex origin URL (or PLEX_ORIGIN env)")

@@ -118,13 +118,43 @@ class Advance(unittest.TestCase):
         seq = ([{"phase": "frames"}]
                + [{"phase": "faces", "done": d, "total": 100}
                   for d in range(0, 101, 5)]
-               + [{"phase": "matching"}, {"phase": "writing"}])
+               + [{"phase": "enrolling", "done": d, "total": 40}
+                  for d in range(0, 41, 10)]
+               + [{"phase": "matching", "done": d, "total": 40}
+                  for d in range(0, 41, 10)]
+               + [{"phase": "writing"}])
         f, seen = 0.0, []
         for ev in seq:
             f = progress.advance(f, ev)
             seen.append(f)
         self.assertEqual(seen, sorted(seen))
         self.assertEqual(seen[0], 0.0)
+
+    def test_the_two_cast_phases_do_not_share_a_high_water_mark(self):
+        """Enrolling and matching both walk the cast, and were one phase.
+        Under one label the second sits at 100% for however long it takes,
+        which is exactly what a hang looks like."""
+        f = 0.0
+        for done in range(0, 41, 10):
+            f = progress.advance(f, {"phase": "enrolling", "done": done,
+                                     "total": 40})
+        after_enrolling = f
+        f = progress.advance(f, {"phase": "matching", "done": 20, "total": 40})
+        self.assertGreater(f, after_enrolling)
+
+
+class PhaseTable(unittest.TestCase):
+    def test_the_weights_are_a_whole_bar(self):
+        """Short of 1.0 and the bar can never reach its cap; over, and a late
+        phase's segment starts past the end and stops moving."""
+        self.assertAlmostEqual(sum(w for _, w in progress.PHASE_WEIGHTS), 1.0)
+
+    def test_the_order_is_the_order_the_pass_runs_them(self):
+        # advance() is monotonic, so a table out of step with the pass parks
+        # the bar at the later segment and everything after it holds still.
+        self.assertEqual(progress.PHASES,
+                         ("frames", "faces", "enrolling", "matching",
+                          "writing"))
 
 
 class StepRouting(unittest.TestCase):

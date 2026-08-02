@@ -20,7 +20,7 @@ import cv2
 import numpy as np
 
 from .. import (engines, faceprints as fpmod, keys, progress,
-                refs as refsmod, schema, store as st)
+                refs as refsmod, retention, schema, store as st)
 from ..faces import cluster as clu, crops
 from ..frames import extract_frames
 from ..sources import commons
@@ -176,7 +176,7 @@ def resolve(source: MediaSource, *, rating_key: str | None, search: str | None) 
     return source.resolve(chosen["ratingKey"])
 
 
-def enrollment_cast(cast, store_dir: Path):
+def enrollment_cast(cast, store_dir: Path, *, on_progress=None):
     """The same cast with its REFERENCE PHOTOS swapped for the chosen source.
 
     Identity is deliberately untouched -- same actorIds, names, characters --
@@ -190,10 +190,16 @@ def enrollment_cast(cast, store_dir: Path):
     """
     if keys.enrollment_source() != "commons":
         return cast
-    out = commons.cast_with_cache(cast, Path(store_dir) / commons.CACHE_NAME)
-    have, had = (sum(1 for m in c if m.get("images")) for c in (out, cast))
-    print(f"[refs]   enrolment photos from Wikimedia Commons: {have} of "
-          f"{len(cast)} cast have one (TMDb had {had})")
+    out = commons.cast_with_cache(cast, Path(store_dir) / commons.CACHE_NAME,
+                                  on_progress=on_progress)
+    # Coverage, not a comparison. This once printed how many photos the other
+    # source would have had, which invited "so why not use that one?" in a log
+    # line people paste into issues -- a licence question answered badly, by
+    # the wrong medium. The number that helps is how many of this cast can be
+    # matched automatically; the rest are named on the labelling screen.
+    have = sum(1 for m in out if m.get("images"))
+    print(f"[refs]   reference photos for {have} of {len(cast)} cast; "
+          f"the rest can be named by hand once the pass finishes")
     return out
 
 
@@ -379,7 +385,8 @@ def run(store_dir: Path, work_dir: Path, *, source: MediaSource,
     if not embeddings:
         raise SystemExit("no faces detected")
 
-    progress.emit("matching")
+    # Still "faces": clustering IS face work, and holding the label steady
+    # here is honest where a new one would imply the slow part had ended.
     # NOT `labels`: that name already holds the display {title, year, series}
     # from the TMDb bundle above, and rebinding it here sent an HDBSCAN array
     # into schema.timeline(labels=...), which raised on `labels or {}` and
@@ -387,13 +394,27 @@ def run(store_dir: Path, work_dir: Path, *, source: MediaSource,
     cluster_labels = clu.cluster_embeddings(
         embeddings, min_cluster_size=opts.min_cluster_size)
     centroids = clu.cluster_centroids(embeddings, cluster_labels)
-    enroll_cast = enrollment_cast(cast, store_dir)
+
+    # Two counted phases, not one. Both walk the cast and both are network-
+    # bound, but they are minutes apart in cost and `progress.advance` is
+    # monotonic within a phase -- run under one label, the second would sit at
+    # 100% for as long as it took, which is what "stuck" looks like.
+    def tick(phase):
+        return lambda done, total: progress.emit(phase, done, total)
+
+    progress.emit("enrolling")
+    enroll_cast = enrollment_cast(cast, store_dir,
+                                  on_progress=tick("enrolling"))
+
+    progress.emit("matching")
     print(f"[refs]   building references for {len(cast)} cast members …")
     if transport is None:
-        refs = refsmod.build_reference_embeddings(enroll_cast, embedder)
+        refs = refsmod.build_reference_embeddings(
+            enroll_cast, embedder, on_progress=tick("matching"))
     else:
         refs = refsmod.build_reference_embeddings_http(
-            enroll_cast, transport, work_dir / "refs")
+            enroll_cast, transport, work_dir / "refs",
+            on_progress=tick("matching"))
     cluster_to_actor = clu.label_clusters(centroids, refs, threshold=opts.threshold)
     _apply_faceprints(store_dir, content_id, centroids, cluster_to_actor)
     intervals = clu.build_intervals(hits, cluster_labels, cluster_to_actor,
@@ -403,7 +424,7 @@ def run(store_dir: Path, work_dir: Path, *, source: MediaSource,
     # they are mostly real, credited characters whose only problem is that
     # no free-licensed photo of them exists. Persist every cluster (plus a
     # few exemplar crops) so a person can name them afterwards, and do it
-    # while the frames still exist -- work_dir does not outlive this call.
+    # while the frames still exist -- they are deleted at the end of this call.
     _record_clusters(store_dir, content_id, cluster_labels, hits, centroids,
                      cluster_to_actor, frames,
                      runtime_ms=item.get("durationMs") or 0, fps=opts.fps,
@@ -415,6 +436,13 @@ def run(store_dir: Path, work_dir: Path, *, source: MediaSource,
                           duration_ms=item.get("durationMs"), labels=labels)
 
     dest = _write_doc(store_dir, item, content_id, doc, source.key_prefix)
+
+    # Only now: the crops above are the last reader, and a pass that failed
+    # earlier keeps its frames for a look. Harvested audio stays -- the music
+    # pass has not run yet, and re-pulling it is a second trip over the wire.
+    freed = retention.drop_frames(work_dir)
+    if freed:
+        print(f"[clean] {retention.human(freed)} of frames removed")
 
     print(f"[out] {len(intervals)} intervals → {dest.name} "
           f"(+ manifest {source.key_prefix}:{item['ratingKey']})" if content_id else

@@ -142,6 +142,25 @@ class TestReferenceEmbeddingsHttp(unittest.TestCase):
             refs = build_reference_embeddings_http(cast, FakeTransport(), tmp)
         np.testing.assert_allclose(refs["tmdb:3"], [0.0, 1.0], atol=1e-6)
 
+    def test_it_reports_progress_over_the_cast(self):
+        """A download plus a detect+embed per member, and it used to run under
+        a phase label with no number — minutes of a still bar."""
+        from xray.refs import build_reference_embeddings_http
+
+        class FakeTransport:
+            def embed_image_file(self, path):
+                return [{"bbox": [0, 0, 1, 1], "embedding": [1.0, 0.0]}]
+
+        cast = [{"actorId": f"tmdb:{i}", "name": f"A{i}", "images": ["u"]}
+                for i in range(3)]
+        ticks = []
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch("xray.refs._fetch_bytes", return_value=b"jpg"):
+            build_reference_embeddings_http(
+                cast, FakeTransport(), tmp,
+                on_progress=lambda d, t: ticks.append((d, t)))
+        self.assertEqual(ticks, [(0, 3), (1, 3), (2, 3)])
+
 
 if __name__ == "__main__":
     unittest.main()

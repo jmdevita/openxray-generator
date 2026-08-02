@@ -246,6 +246,25 @@ class PhotoCache(unittest.TestCase):
         self.assertEqual(cached["tmdb:1"]["images"], out[0]["images"])
         self.assertEqual(cached["tmdb:2"]["images"], [])
 
+    def test_resolution_reports_progress_over_what_it_asks_about(self):
+        """This loop is the "finding cast photos" bar. Counted over the STALE
+        members, not the whole cast: on a second episode most are cached, and
+        a bar that crawls to 20% and stops is the shape of a hang."""
+        ticks = []
+        commons.cast_with_cache(self.cast, self.cache, session=self._session(),
+                                now=1000.0, log=quiet,
+                                on_progress=lambda d, t: ticks.append((d, t)))
+        self.assertEqual(ticks, [(0, 2), (1, 2)])
+
+    def test_a_fully_cached_cast_reports_nothing_because_it_does_nothing(self):
+        commons.cast_with_cache(self.cast, self.cache, session=self._session(),
+                                now=1000.0, log=quiet)
+        ticks = []
+        commons.cast_with_cache(self.cast, self.cache, session=self._session(),
+                                now=1000.0, log=quiet,
+                                on_progress=lambda d, t: ticks.append((d, t)))
+        self.assertEqual(ticks, [])
+
     def test_warm_asks_the_network_nothing(self):
         commons.cast_with_cache(self.cast, self.cache, session=self._session(),
                                 now=1000.0, log=quiet)

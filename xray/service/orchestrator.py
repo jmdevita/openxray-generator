@@ -16,6 +16,8 @@ web-token auth gate on every route (SECURITY.md).
   GET  /api/libraries    library sections to run against
   GET  /api/plan         ?library= → coverage + per-level cost estimate
   GET  /api/jobs         job list (+ ?id= for one job, &log=0 to omit the log)
+  GET  /api/storage      what the passes left on disk, and what can go
+  POST /api/storage/clean  reclaim it
   …/api/setup, /api/settings, /api/auth/plex/*, /api/auth/jellyfin/*,
   /api/export/{cid}, /api/hub/upload/{cid}, /api/import, /api/validate
 
@@ -41,7 +43,7 @@ from pydantic import BaseModel
 from .. import engines
 from .. import keys as k
 from .. import faceprints as fpmod, voiceprints as vpmod
-from .. import pipeline, prints, settings_store as ss, store as st
+from .. import pipeline, prints, retention, settings_store as ss, store as st
 from ..budget import AuddBudget
 from .. import progress
 from . import media_auth as ma
@@ -759,6 +761,49 @@ def api_settings_put(patch: SettingsPatch):
         raise HTTPException(422, "backend must be plex or jellyfin")
     ss.update(patch.model_dump())
     return ss.redacted()
+
+
+# --- disk ------------------------------------------------------------------
+
+
+def _busy() -> set[str]:
+    """Content ids a running job has in flight, so cleaning cannot pull the
+    floor out from under it."""
+    with _lock:
+        rks = [j["current"] for j in _jobs
+               if j["status"] == "running" and j.get("current")]
+    if not rks:
+        return set()
+    lookup = st.load_manifest(STORE).get("lookup", {})
+    cids = {lookup.get(f"{_backend()}:{rk}", "") for rk in rks}
+    # A title being indexed for the FIRST time has no mapping yet, so its
+    # content id is unknowable from here. The rating keys go in anyway: they
+    # match no work directory, but they keep this set non-empty, which is what
+    # holds the shared frames directory.
+    return {c for c in cids if c} | set(rks)
+
+
+@app.get("/api/storage")
+def api_storage():
+    return retention.survey(STORE, busy=_busy())
+
+
+class CleanRequest(BaseModel):
+    #: Empty list means every kind; the UI sends nothing and gets the lot.
+    kinds: list[str] = []
+
+
+@app.post("/api/storage/clean")
+def api_storage_clean(req: CleanRequest):
+    kinds = req.kinds or list(retention.KINDS)
+    unknown = set(kinds) - set(retention.KINDS)
+    if unknown:
+        raise HTTPException(422, f"unknown kind(s): {', '.join(sorted(unknown))}")
+    result = retention.clean(STORE, kinds=kinds, busy=_busy())
+    return {"freed": result.freed,
+            "removed": [{"kind": c.kind, "contentId": c.content_id,
+                         "bytes": c.bytes} for c in result.removed],
+            "storage": retention.survey(STORE, busy=_busy())}
 
 
 # --- speaker model weights --------------------------------------------------

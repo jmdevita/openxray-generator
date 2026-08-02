@@ -256,6 +256,31 @@ button.namebtn:hover .n{background:var(--paper);color:var(--warn)}
  text-underline-offset:2px}
 .spkbox a:hover{color:var(--ink)}
 
+/* Disk. One stacked bar over the store's own totals, then the legend.
+   The kinds that CAN be reclaimed carry the accent and the ones that cannot
+   are grey: the picture answers "what can go", not "name five categories",
+   so the hue encodes exactly that and nothing else. */
+.diskbar{display:flex;height:9px;border-radius:5px;overflow:hidden;
+ background:var(--soft);margin:.55rem 0 .2rem}
+.diskbar i{display:block;height:100%}
+.kframes{background:var(--accent)}
+.kmusic{background:var(--accent);opacity:.6}
+.kspeakers{background:var(--accent);opacity:.32}
+.kcrops{background:var(--faint)}
+.kother{background:var(--line)}
+.disklist{list-style:none;margin:0;padding:0}
+/* Swatch, label, size on the first line; the prose spans below span the rest
+   of the width. One flat row would put a 60-character note in a table cell. */
+.disklist li{display:grid;grid-template-columns:9px 1fr auto;gap:.1rem .5rem;
+ align-items:center;padding:.45rem 0;border-bottom:1px solid var(--line)}
+.disklist li:last-child{border-bottom:0}
+.disklist b{font-weight:590;font-size:13px}
+.disklist .sw{width:9px;height:9px;border-radius:2px}
+.disklist .amt{font:11.5px var(--mono);color:var(--faint);
+ font-variant-numeric:tabular-nums}
+.disklist .meta,.disklist .held{grid-column:2/4;font-size:12.5px}
+.disklist .held{color:var(--warn)}
+
 /* A shell command to copy. Wraps and scrolls rather than widening its column:
    the whole reason this file is being touched is a card that did neither. */
 .cmd{margin:.45rem 0 0;padding:.5rem .6rem;border-radius:6px;

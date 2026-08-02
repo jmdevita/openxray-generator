@@ -25,8 +25,12 @@ MARKER = "[progress]"
 #: APPORTIONED, never whether it moves. Without them a single high-water mark
 #: cannot express two counting phases in a row: extraction would fill the bar
 #: and the face loop would then have nowhere left to go.
-PHASE_WEIGHTS = (("frames", 0.45), ("faces", 0.45),
-                 ("matching", 0.07), ("writing", 0.03))
+#:
+#: ORDER MUST MATCH EXECUTION. `advance` is monotonic, so a phase emitted out
+#: of order parks the bar at the later segment and everything after it holds
+#: still.
+PHASE_WEIGHTS = (("frames", 0.45), ("faces", 0.42), ("enrolling", 0.06),
+                 ("matching", 0.04), ("writing", 0.03))
 PHASES = tuple(name for name, _ in PHASE_WEIGHTS)
 
 
@@ -97,7 +101,7 @@ def advance(previous: float, event: dict) -> float:
 def fraction(event: dict) -> float:
     """How far through the current phase, 0..1.
 
-    Phases without a total (ffmpeg extraction, cast matching) report 0: a bar
+    Phases without a total (ffmpeg extraction, clustering) report 0: a bar
     that cannot measure something should not invent a position for it. The
     phase LABEL is what carries the information there.
     """
